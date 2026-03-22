@@ -1,6 +1,7 @@
 import { useCallback, useState, useEffect } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { RecordingSource } from '../shared/types'
+import { useRecordingCountdown } from '../hooks/useRecordingCountdown'
 import { 
   Settings, 
   Monitor, 
@@ -14,6 +15,7 @@ import {
   VolumeX,
   Pause,
   Play,
+  Undo2,
   X
 } from 'lucide-react'
 
@@ -35,10 +37,13 @@ interface ToolbarProps {
   onStartRecording: () => void
   onStopRecording: () => void
   isRecording: boolean
+  onOpenWindowPicker?: () => void
 }
 
-export default function Toolbar({ onStartRecording, onStopRecording, isRecording }: ToolbarProps) {
+export default function Toolbar({ onStartRecording, onStopRecording, isRecording, onOpenWindowPicker }: ToolbarProps) {
   const {
+    status,
+    countdownValue,
     setSelectedSource,
     setPendingAreaSelection,
     microphoneEnabled,
@@ -46,10 +51,10 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
     systemAudioEnabled,
     setSystemAudioEnabled,
     cameraEnabled,
-    setCameraEnabled,
-    setStatus,
-    settings
+    setCameraEnabled
   } = useAppStore()
+
+  const { startCountdown } = useRecordingCountdown()
 
   const [recordingTime, setRecordingTime] = useState(0)
   const [isPaused, setIsPaused] = useState(false)
@@ -69,25 +74,11 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
     const unlisten = window.caplet.onAreaSelected((area) => {
       setPendingAreaSelection(area)
       setSelectedSource('area')
-
-      const countdownSeconds = settings.countdown || 3
-      let count = countdownSeconds
-      
-      setStatus('countdown')
-      const countdownTimer = setInterval(() => {
-        count--
-        if (count <= 0) {
-          clearInterval(countdownTimer)
-          setStatus('idle')
-          onStartRecording()
-        } else {
-          setStatus('countdown')
-        }
-      }, 1000)
+      startCountdown(() => onStartRecording())
     })
     
     return () => unlisten()
-  }, [settings.countdown, setSelectedSource, setPendingAreaSelection, setStatus, onStartRecording])
+  }, [setSelectedSource, setPendingAreaSelection, startCountdown, onStartRecording])
 
   const formatTime = (seconds: number): string => {
     const hrs = Math.floor(seconds / 3600)
@@ -97,7 +88,7 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
   }
 
   const handleSourceClick = useCallback((source: RecordingSource) => {
-    if (isRecording) return
+    if (status !== 'idle') return
     
     if (source === 'area') {
       setSelectedSource(source)
@@ -105,20 +96,21 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
       return
     }
     
+    if (source === 'window') {
+      setSelectedSource(source)
+      onOpenWindowPicker?.()
+      return
+    }
+
+    if (source === 'camera') {
+      setSelectedSource(source)
+      window.caplet.startCameraPreview()
+      return
+    }
+    
     setSelectedSource(source)
-    setStatus('countdown')
-    let count = 3
-    const countdownTimer = setInterval(() => {
-      count--
-      if (count <= 0) {
-        clearInterval(countdownTimer)
-        setStatus('idle')
-        onStartRecording()
-      } else {
-        setStatus('countdown')
-      }
-    }, 1000)
-  }, [isRecording, setSelectedSource, setStatus, onStartRecording])
+    startCountdown(() => onStartRecording())
+  }, [status, setSelectedSource, startCountdown, onStartRecording, onOpenWindowPicker])
 
   const handleRecordToggle = useCallback(() => {
     if (isRecording) {
@@ -157,15 +149,15 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
 
       {/* 中间：录制源 或 计时器+控制 */}
       <div className="flex items-center justify-center gap-1 min-w-[220px]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {isRecording ? (
+        {status === 'recording' || status === 'paused' ? (
           <>
             {/* 计时器 */}
             <div className="flex items-center gap-2 mr-2">
               <div 
                 className="w-2.5 h-2.5 rounded-full"
                 style={{ 
-                  backgroundColor: isPaused ? '#fbbf24' : '#ef4444',
-                  boxShadow: isPaused 
+                  backgroundColor: status === 'paused' ? '#fbbf24' : '#ef4444',
+                  boxShadow: status === 'paused' 
                     ? '0 0 8px rgba(251,191,36,0.8)' 
                     : '0 0 8px rgba(239,68,68,0.8)'
                 }}
@@ -191,6 +183,40 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
               <Square size={16} strokeWidth={2} fill="currentColor" />
             </button>
           </>
+        ) : status === 'countdown' ? (
+          /* 倒计时状态 */
+          <div className="flex items-center gap-4 mr-1">
+            <div className="flex items-center gap-2">
+              <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse" />
+              <span className="font-mono text-yellow-400 text-sm font-medium tracking-wide">
+                即将开始: {countdownValue}s
+              </span>
+            </div>
+            
+            <div className="flex items-center gap-2 border-l border-white/10 pl-3">
+              <button
+                onClick={() => {
+                  const store = useAppStore.getState()
+                  
+                  store.setStatus('idle')
+                  store.setCountdownValue(0)
+                  
+                  if (store.selectedSource === 'area') {
+                    window.caplet.cancelAreaSelection()
+                    store.setPendingAreaSelection(null)
+                  } else if (store.selectedSource === 'window') {
+                    store.setSelectedWindow(null)
+                  } else if (store.selectedSource === 'camera') {
+                    store.setPendingCameraSettings(null)
+                  }
+                }}
+                className="p-1 text-gray-400 hover:text-white hover:bg-white/10 rounded-md transition-all"
+                title="返回上一步 (Esc)"
+              >
+                <Undo2 size={16} />
+              </button>
+            </div>
+          </div>
         ) : (
           /* 录制源按钮 */
           (['display', 'window', 'area', 'camera'] as const).map((source) => {

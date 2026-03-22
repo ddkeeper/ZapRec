@@ -6,6 +6,10 @@ export interface DesktopSource {
   appIcon: string | null
 }
 
+export interface CameraSettings {
+  deviceId: string
+}
+
 export type RecordingSource = 'display' | 'window' | 'area' | 'camera'
 
 export type RecordingQuality = '720p' | '1080p' | '1080p60'

@@ -1,4 +1,4 @@
-import { DesktopSource } from '../shared/types'
+import { DesktopSource, CameraSettings } from '../shared/types'
 
 declare global {
   interface Window {
@@ -23,6 +23,16 @@ declare global {
       sendRecordingStopped: () => void
       onShortcutToggleRecord: (callback: () => void) => () => void
       onShortcutTogglePause: (callback: () => void) => () => void
+      startWindowPicker: () => void
+      cancelWindowPicker: () => void
+      sendWindowSelected: (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => void
+      onWindowSelected: (callback: (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => void) => () => void
+      onWindowSelectionCancelled: (callback: () => void) => () => void
+      startCameraPreview: () => void
+      cancelCameraPreview: () => void
+      sendCameraSettingsConfirmed: (settings: CameraSettings) => void
+      onCameraSettingsConfirmed: (callback: (settings: CameraSettings) => void) => () => void
+      onCameraPreviewCancelled: (callback: () => void) => () => void
     }
   }
 }
@@ -34,10 +44,18 @@ export interface CaptureOptions {
   audioSource?: 'user' | 'desktop'
 }
 
+export interface WindowInfo {
+  id: string
+  name: string
+  thumbnail: string
+  appIcon: string | null
+}
+
 export class MediaCapturer {
   private displayStream: MediaStream | null = null
   private microphoneStream: MediaStream | null = null
   private cameraStream: MediaStream | null = null
+  private targetWindowId: string | null = null
   
   async getDisplaySources(): Promise<DesktopSource[]> {
     return window.caplet.getSources(['screen', 'window'])
@@ -74,6 +92,32 @@ export class MediaCapturer {
     return this.displayStream
   }
 
+  async startWindowCapture(windowId: string): Promise<MediaStream> {
+    this.stopDisplayCapture()
+    this.targetWindowId = windowId
+
+    const constraints: MediaStreamConstraints = {
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'desktop',
+          chromeMediaSourceId: windowId
+        }
+      } as MediaTrackConstraints
+    }
+
+    this.displayStream = await navigator.mediaDevices.getUserMedia(constraints)
+    return this.displayStream
+  }
+
+  getTargetWindowId(): string | null {
+    return this.targetWindowId
+  }
+
+  clearTargetWindowId(): void {
+    this.targetWindowId = null
+  }
+
   async startMicrophoneCapture(): Promise<MediaStream> {
     this.stopMicrophoneCapture()
     
@@ -89,16 +133,19 @@ export class MediaCapturer {
     return this.microphoneStream
   }
 
-  async startCameraCapture(): Promise<MediaStream> {
+  async startCameraCapture(audio: boolean = false, deviceId?: string): Promise<MediaStream> {
     this.stopCameraCapture()
     
+    const videoConstraints: MediaTrackConstraints = {
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30 }
+    }
+    
     this.cameraStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-        frameRate: { ideal: 30 }
-      }
+      audio: audio,
+      video: videoConstraints
     })
     
     return this.cameraStream
@@ -129,6 +176,7 @@ export class MediaCapturer {
     this.stopDisplayCapture()
     this.stopMicrophoneCapture()
     this.stopCameraCapture()
+    this.targetWindowId = null
   }
 
   getDisplayStream(): MediaStream | null {

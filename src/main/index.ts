@@ -25,6 +25,8 @@ const store: Record<string, unknown> = {}
 
 let mainWindow: BrowserWindow | null = null
 let selectionWindow: BrowserWindow | null = null
+let windowPickerWindow: BrowserWindow | null = null
+let cameraPreviewWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let writeStream: fs.WriteStream | null = null
 
@@ -88,6 +90,7 @@ function createWindow() {
   mainWindow.on('close', () => {
     // 级联生命周期管理：主窗口关闭时同步销毁所有附属窗口
     destroySelectionWindow()
+    destroyWindowPickerWindow()
   })
 
   mainWindow.on('closed', () => {
@@ -298,6 +301,199 @@ function destroySelectionWindow() {
 }
 
 // ============================================
+// 窗口选择器独立窗口
+// ============================================
+function createWindowPickerWindow() {
+  if (windowPickerWindow) {
+    windowPickerWindow.close()
+  }
+
+  const { x, y, width, height } = screen.getPrimaryDisplay().bounds
+
+  windowPickerWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    transparent: true,
+    frame: false,
+    //thickFrame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    movable: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    type: 'toolbar',
+    minWidth: width,
+    maxWidth: width,
+    minHeight: height,
+    maxHeight: height,
+    show: false, // 先创建后加载，避免加载时的闪烁和系统边框
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  windowPickerWindow.setResizable(false)
+  windowPickerWindow.setMovable(false)
+  windowPickerWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  // 核心修改 2：当页面完成首次视觉绘制（HTML/CSS 已经撑满全屏）时，瞬间显示窗口
+  windowPickerWindow.once('ready-to-show', () => {
+    if (windowPickerWindow) {
+      windowPickerWindow.show()
+    }
+  })
+  
+  if (VITE_DEV_SERVER_URL) {
+    windowPickerWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/window-picker.html`)
+  } else {
+    windowPickerWindow.loadFile(path.join(__dirname, '../../dist/window-picker.html'))
+  }
+
+  if (process.platform === 'win32') {
+    windowPickerWindow.hookWindowMessage(0x0084, (_e, result) => {
+      result.writeInt32LE(1, 0)
+      return true
+    })
+  }
+
+  windowPickerWindow.on('closed', () => {
+    windowPickerWindow = null
+  })
+}
+
+function destroyWindowPickerWindow() {
+  if (windowPickerWindow) {
+    windowPickerWindow.close()
+    windowPickerWindow = null
+  }
+}
+
+// ============================================
+// 摄像头预览独立窗口
+// ============================================
+function createCameraPreviewWindow() {
+  if (cameraPreviewWindow) {
+    cameraPreviewWindow.close()
+  }
+
+  const { x, y, width, height } = screen.getPrimaryDisplay().bounds
+
+  cameraPreviewWindow = new BrowserWindow({
+    x,
+    y,
+    width,
+    height,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    movable: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    type: 'toolbar',
+    minWidth: width,
+    maxWidth: width,
+    minHeight: height,
+    maxHeight: height,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  cameraPreviewWindow.setResizable(false)
+  cameraPreviewWindow.setMovable(false)
+  cameraPreviewWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  if (VITE_DEV_SERVER_URL) {
+    cameraPreviewWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/camera-preview.html`)
+  } else {
+    cameraPreviewWindow.loadFile(path.join(__dirname, '../../dist/camera-preview.html'))
+  }
+
+  if (process.platform === 'win32') {
+    cameraPreviewWindow.hookWindowMessage(0x0084, (_e, result) => {
+      result.writeInt32LE(1, 0)
+      return true
+    })
+  }
+
+  cameraPreviewWindow.on('closed', () => {
+    cameraPreviewWindow = null
+  })
+}
+
+// ============================================
+// 窗口选择器 IPC
+// ============================================
+ipcMain.on('start-window-picker', () => {
+  if (mainWindow) {
+    mainWindow.hide()
+  }
+  createWindowPickerWindow()
+})
+
+ipcMain.on('cancel-window-picker', () => {
+  destroyWindowPickerWindow()
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.webContents.send('window-selection-cancelled')
+  }
+})
+
+ipcMain.on('window-selected', (_, windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => {
+  destroyWindowPickerWindow()
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.webContents.send('window-selected', windowData)
+  }
+})
+
+// ============================================
+// 摄像头预览 IPC
+// ============================================
+ipcMain.on('start-camera-preview', () => {
+  if (mainWindow) {
+    mainWindow.hide()
+  }
+  createCameraPreviewWindow()
+})
+
+ipcMain.on('cancel-camera-preview', () => {
+  if (cameraPreviewWindow) {
+    cameraPreviewWindow.close()
+    cameraPreviewWindow = null
+  }
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.webContents.send('camera-preview-cancelled')
+  }
+})
+
+ipcMain.on('camera-settings-confirmed', (_, settings: { deviceId: string }) => {
+  if (cameraPreviewWindow) {
+    cameraPreviewWindow.close()
+    cameraPreviewWindow = null
+  }
+  if (mainWindow) {
+    mainWindow.show()
+    mainWindow.webContents.send('camera-settings-confirmed', settings)
+  }
+})
+
+
+// ============================================
 
 ipcMain.on('start-area-selection', () => {
   if (mainWindow) {
@@ -327,7 +523,6 @@ ipcMain.on('cancel-area-selection', () => {
   }
 })
 
-// 专家体验升级：用户彻底停止录制时，才销毁幕布窗口
 ipcMain.on('recording-stopped', () => {
   destroySelectionWindow()
 })

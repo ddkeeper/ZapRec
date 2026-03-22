@@ -2,19 +2,30 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useAppStore } from './store/useAppStore'
 import Toolbar from './components/Toolbar'
 import AreaOverlay, { type AreaSelection } from './components/AreaOverlay'
+import CameraPreviewOverlay from './components/CameraPreviewOverlay'
 import { mediaCapturer } from './core/MediaCapturer'
 import { audioMixer } from './core/AudioMixer'
 import { recordingEngine } from './core/RecordingEngine'
-import { QUALITY_PRESETS } from './shared/types'
+import { QUALITY_PRESETS, type CameraSettings } from './shared/types'
+import { useRecordingCountdown } from './hooks/useRecordingCountdown'
 
 function App() {
   const isAreaSelectionMode = window.location.hash === '#/area-selection'
+  const isCameraPreviewMode = window.location.hash === '#/camera-preview'
+
+  if (isCameraPreviewMode) {
+    return <CameraPreviewOverlay
+      onConfirm={(settings: CameraSettings) => window.caplet.sendCameraSettingsConfirmed(settings)}
+      onCancel={() => window.caplet.cancelCameraPreview()}
+    />
+  }
 
   if (isAreaSelectionMode) {
     return <AreaOverlayForSelectionWindow />
   }
 
   const { setLastSavedPath, status, setStatus } = useAppStore()
+  const { startCountdown } = useRecordingCountdown()
 
   const [defaultPath, setDefaultPath] = useState('')
 
@@ -22,7 +33,6 @@ function App() {
   const displayStreamRef = useRef<MediaStream | null>(null)
   const systemAudioStreamRef = useRef<MediaStream | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
-  // Canvas 裁剪相关 ref
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const videoElementRef = useRef<HTMLVideoElement | null>(null)
   const cropIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -151,14 +161,80 @@ function App() {
       let recordingWidth = quality.width
       let recordingHeight = quality.height
 
-      if (currentSource === 'display' || currentSource === 'window') {
+      if (currentSource === 'display') {
         const sourceId = currentSourceId || 'screen:0:0'
         displayStream = await mediaCapturer.startDisplayCapture(sourceId)
         displayStreamRef.current = displayStream
 
-      } else if (currentSource === 'camera') {
-        displayStream = await mediaCapturer.startCameraCapture()
+      } else if (currentSource === 'window') {
+        const windowInfo = state.selectedWindow
+        if (!windowInfo) {
+          console.error('[ZapRec] Window mode but no window selected')
+          await window.caplet.streamEnd()
+          setStatus('idle')
+          return
+        }
+        displayStream = await mediaCapturer.startWindowCapture(windowInfo.id)
         displayStreamRef.current = displayStream
+        
+        const videoTrack = displayStream.getVideoTracks()[0]
+        if (videoTrack) {
+          const getRealDimensions = (stream: MediaStream): Promise<{ width: number, height: number }> => {
+            return new Promise((resolve) => {
+              const video = document.createElement('video')
+              video.srcObject = stream
+              video.muted = true
+              
+              video.onloadedmetadata = () => {
+                resolve({ width: video.videoWidth, height: video.videoHeight })
+                video.srcObject = null
+              }
+              video.play().catch(() => {})
+            })
+          }
+
+          const realSize = await getRealDimensions(displayStream)
+          recordingWidth = realSize.width
+          recordingHeight = realSize.height
+          if (recordingWidth % 2 !== 0) recordingWidth--
+          if (recordingHeight % 2 !== 0) recordingHeight--
+
+          videoTrack.onended = () => {
+            console.warn('[ZapRec] 目标窗口已关闭，自动停止并保存录制')
+            stopRecording()
+          }
+        }
+
+      } else if (currentSource === 'camera') {
+        const pendingSettings = state.pendingCameraSettings
+        if (!pendingSettings) {
+          console.error('[ZapRec] Camera mode but no pending settings')
+          await window.caplet.streamEnd()
+          setStatus('idle')
+          return
+        }
+        
+        displayStream = await mediaCapturer.startCameraCapture(micEnabled, pendingSettings.deviceId)
+        displayStreamRef.current = displayStream
+        
+        const videoTrack = displayStream.getVideoTracks()[0]
+        if (videoTrack) {
+          const settings = videoTrack.getSettings()
+          
+          recordingWidth = settings.width || quality.width
+          recordingHeight = settings.height || quality.height
+          
+          if (recordingWidth % 2 !== 0) recordingWidth--
+          if (recordingHeight % 2 !== 0) recordingHeight--
+
+          console.log(`[ZapRec] 摄像头录制就绪，真实分辨率: ${recordingWidth}x${recordingHeight}`)
+          
+          useAppStore.getState().setPendingCameraSettings(null)
+        } else {
+          console.error('[ZapRec] 无法获取摄像头视频轨道')
+          setStatus('idle')
+          return
+        }
 
       } else if (currentSource === 'area') {
         const pendingArea = state.pendingAreaSelection
@@ -263,7 +339,6 @@ function App() {
       useAppStore.getState().reset()
       setStatus('idle')
 
-      // 通知主进程销毁幽灵镂空幕布
       window.caplet.sendRecordingStopped()
 
     } catch (error) {
@@ -319,12 +394,43 @@ function App() {
     return () => unlisten()
   }, [])
 
+  useEffect(() => {
+    const unlisten = window.caplet.onCameraSettingsConfirmed((settings) => {
+      useAppStore.getState().setPendingCameraSettings(settings)
+      useAppStore.getState().setSelectedSource('camera')
+      startCountdown(() => startRecording())
+    })
+    return () => unlisten()
+  }, [startCountdown, startRecording])
+
+  useEffect(() => {
+    const unlistenWindowSelected = window.caplet.onWindowSelected((windowData) => {
+      useAppStore.getState().setSelectedWindow(windowData)
+      startCountdown(() => startRecording())
+    })
+
+    const unlistenWindowCancelled = window.caplet.onWindowSelectionCancelled(() => {
+      useAppStore.getState().setSelectedSource('display')
+    })
+
+    return () => {
+      unlistenWindowSelected()
+      unlistenWindowCancelled()
+    }
+  }, [startCountdown, startRecording])
+
+  const handleOpenWindowPicker = useCallback(() => {
+    useAppStore.getState().setSelectedSource('window')
+    window.caplet.startWindowPicker()
+  }, [])
+
   return (
     <div className="h-screen w-screen overflow-hidden">
       <Toolbar
         onStartRecording={startRecording}
         onStopRecording={stopRecording}
         isRecording={status === 'recording'}
+        onOpenWindowPicker={handleOpenWindowPicker}
       />
     </div>
   )

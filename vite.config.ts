@@ -55,6 +55,13 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, 'index.html'),
+        'window-picker': path.resolve(__dirname, 'window-picker.html'),
+        'camera-preview': path.resolve(__dirname, 'camera-preview.html')
+      }
+    }
   }
 })

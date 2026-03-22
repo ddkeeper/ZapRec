@@ -45,6 +45,40 @@ const api = {
     const handler = () => callback()
     ipcRenderer.on('shortcut:toggle-pause', handler)
     return () => ipcRenderer.removeListener('shortcut:toggle-pause', handler)
+  },
+
+  startWindowPicker: () => ipcRenderer.send('start-window-picker'),
+  cancelWindowPicker: () => ipcRenderer.send('cancel-window-picker'),
+  sendWindowSelected: (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => {
+    ipcRenderer.send('window-selected', windowData)
+  },
+  
+  onWindowSelected: (callback: (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => void) => {
+    const handler = (_: unknown, windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => callback(windowData)
+    ipcRenderer.on('window-selected', handler)
+    return () => ipcRenderer.removeListener('window-selected', handler)
+  },
+  onWindowSelectionCancelled: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('window-selection-cancelled', handler)
+    return () => ipcRenderer.removeListener('window-selection-cancelled', handler)
+  },
+
+  startCameraPreview: () => ipcRenderer.send('start-camera-preview'),
+  cancelCameraPreview: () => ipcRenderer.send('cancel-camera-preview'),
+  sendCameraSettingsConfirmed: (settings: { deviceId: string }) => {
+    ipcRenderer.send('camera-settings-confirmed', settings)
+  },
+  
+  onCameraSettingsConfirmed: (callback: (settings: { deviceId: string }) => void) => {
+    const handler = (_: unknown, settings: { deviceId: string }) => callback(settings)
+    ipcRenderer.on('camera-settings-confirmed', handler)
+    return () => ipcRenderer.removeListener('camera-settings-confirmed', handler)
+  },
+  onCameraPreviewCancelled: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('camera-preview-cancelled', handler)
+    return () => ipcRenderer.removeListener('camera-preview-cancelled', handler)
   }
 }
 

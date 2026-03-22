@@ -1,11 +1,22 @@
 import { create } from 'zustand'
-import { AppState, AppSettings, RecordingSource, RecordingStatus, DEFAULT_SETTINGS } from '../shared/types'
+import { AppState, AppSettings, RecordingSource, RecordingStatus, DEFAULT_SETTINGS, CameraSettings } from '../shared/types'
+
+export interface WindowInfo {
+  id: string
+  name: string
+  thumbnail: string
+  appIcon: string | null
+}
 
 interface AppStore extends AppState {
   isSelectingArea: boolean
   pendingAreaSelection: { x: number; y: number; width: number; height: number } | null
+  selectedWindow: WindowInfo | null
+  pendingCameraSettings: CameraSettings | null
   setIsSelectingArea: (value: boolean) => void
   setPendingAreaSelection: (area: { x: number; y: number; width: number; height: number } | null) => void
+  setSelectedWindow: (window: WindowInfo | null) => void
+  setPendingCameraSettings: (settings: CameraSettings | null) => void
   setStatus: (status: RecordingStatus) => void
   setSelectedSource: (source: RecordingSource) => void
   setSelectedSourceId: (id: string | null) => void
@@ -24,6 +35,8 @@ interface AppStore extends AppState {
 export const useAppStore = create<AppStore>((set) => ({
   isSelectingArea: false,
   pendingAreaSelection: null,
+  selectedWindow: null,
+  pendingCameraSettings: null,
   status: 'idle',
   selectedSource: 'display',
   selectedSourceId: null,
@@ -35,25 +48,29 @@ export const useAppStore = create<AppStore>((set) => ({
   recordingDuration: 0,
   lastSavedPath: null,
 
-  setIsSelectingArea: (value) => set({ isSelectingArea: value }),
-  setPendingAreaSelection: (area) => set({ pendingAreaSelection: area }),
-  setStatus: (status) => set({ status }),
-  setSelectedSource: (source) => set({ selectedSource: source }),
-  setSelectedSourceId: (id) => set({ selectedSourceId: id }),
+  setIsSelectingArea: (value: boolean) => set({ isSelectingArea: value }),
+  setPendingAreaSelection: (area: { x: number; y: number; width: number; height: number } | null) => set({ pendingAreaSelection: area }),
+  setSelectedWindow: (window: WindowInfo | null) => set({ selectedWindow: window }),
+  setPendingCameraSettings: (settings: CameraSettings | null) => set({ pendingCameraSettings: settings }),
+  setStatus: (status: RecordingStatus) => set({ status }),
+  setSelectedSource: (source: RecordingSource) => set({ selectedSource: source }),
+  setSelectedSourceId: (id: string | null) => set({ selectedSourceId: id }),
   toggleMicrophone: () => set((state) => ({ microphoneEnabled: !state.microphoneEnabled })),
   toggleSystemAudio: () => set((state) => ({ systemAudioEnabled: !state.systemAudioEnabled })),
-  setMicrophoneEnabled: (enabled) => set({ microphoneEnabled: enabled }),
-  setSystemAudioEnabled: (enabled) => set({ systemAudioEnabled: enabled }),
-  setCameraEnabled: (enabled) => set({ cameraEnabled: enabled }),
-  setSettings: (settings) => set((state) => ({ 
+  setMicrophoneEnabled: (enabled: boolean) => set({ microphoneEnabled: enabled }),
+  setSystemAudioEnabled: (enabled: boolean) => set({ systemAudioEnabled: enabled }),
+  setCameraEnabled: (enabled: boolean) => set({ cameraEnabled: enabled }),
+  setSettings: (settings: Partial<AppSettings>) => set((state) => ({ 
     settings: { ...state.settings, ...settings } 
   })),
-  setCountdownValue: (value) => set({ countdownValue: value }),
-  setRecordingDuration: (duration) => set({ recordingDuration: duration }),
-  setLastSavedPath: (path) => set({ lastSavedPath: path }),
+  setCountdownValue: (value: number) => set({ countdownValue: value }),
+  setRecordingDuration: (duration: number) => set({ recordingDuration: duration }),
+  setLastSavedPath: (path: string | null) => set({ lastSavedPath: path }),
   reset: () => set({
     isSelectingArea: false,
     pendingAreaSelection: null,
+    selectedWindow: null,
+    pendingCameraSettings: null,
     status: 'idle',
     selectedSource: 'display',
     selectedSourceId: null,
