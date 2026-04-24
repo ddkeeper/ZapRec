@@ -1,10 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { SquareMousePointer } from 'lucide-react'
 
 export interface AreaSelection {
   x: number
   y: number
-  width: number
   height: number
+  width: number
 }
 
 interface AreaOverlayProps {
@@ -20,7 +21,6 @@ export default function AreaOverlay({ onConfirm, onCancel }: AreaOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    // 监听来自主进程的消息，进入幽灵幕布模式
     const unlisten = window.caplet.onSwitchToRecordingVisuals(() => {
       setIsRecordingVisuals(true)
     })
@@ -36,12 +36,10 @@ export default function AreaOverlay({ onConfirm, onCancel }: AreaOverlayProps) {
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!isSelecting || !startPoint) return
-
     const x = Math.min(startPoint.x, e.clientX)
     const y = Math.min(startPoint.y, e.clientY)
     const width = Math.abs(e.clientX - startPoint.x)
     const height = Math.abs(e.clientY - startPoint.y)
-
     setSelection({ x, y, width, height })
   }, [isSelecting, startPoint])
 
@@ -65,91 +63,23 @@ export default function AreaOverlay({ onConfirm, onCancel }: AreaOverlayProps) {
   return (
     <div
       ref={overlayRef}
-      // 专家体验增强：进入录制视觉后，最外层 div 增加 pointer-events-none，
-      // 确保配合主进程的 setIgnoreMouseEvents 实现 100% 鼠标穿透
-      className={`fixed inset-0 z-[9999] select-none ${isRecordingVisuals ? 'pointer-events-none' : 'cursor-crosshair'}`}
-      style={{ 
+      className={`fixed inset-0 z-[9999] select-none ${isRecordingVisuals ? 'pointer-events-none' : ''}`}
+      style={{
         WebkitAppRegion: 'no-drag',
         WebkitUserSelect: 'none',
-        ...(isRecordingVisuals ? {} : { backgroundColor: 'rgba(0, 0, 0, 0.3)' })
       } as React.CSSProperties}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
     >
-      {/* ===================== 录制进行中的幽灵镂空幕布 ===================== */}
-      {isRecordingVisuals && selection && (
-        <svg className="absolute inset-0 w-full h-full pointer-events-none">
-          <defs>
-            <mask id="recording-hole">
-              {/* 白底代表不透明阴影区 */}
-              <rect width="100%" height="100%" fill="white" />
-              {/* 黑块代表抠空的区域 (真实的录制区，完全透明) */}
-              <rect
-                x={selection.x}
-                y={selection.y}
-                width={selection.width}
-                height={selection.height}
-                fill="black"
-              />
-            </mask>
-          </defs>
 
-          {/* 全屏阴影幕布，被 recording-hole 镂空，提供沉浸式录制体验。
-              注意：录制阶段 (isRecordingVisuals=true) 绝对不在此层绘制红框或指示器！
-              因为只要画在屏幕上，不论放在 mask 内外，只要处于选区边缘，都会因为 
-              desktopCapturer 捕获全屏合成层的特性，被切进录制视频里，污染用户的素材！*/}
-          <rect
-            width="100%"
-            height="100%"
-            fill="rgba(0, 0, 0, 0.6)"
-            mask="url(#recording-hole)"
-          />
-        </svg>
-      )}
-
-      {/* ===================== 选区操作阶段的 UI ===================== */}
-      {!isRecordingVisuals && selection && (
-        <div
-          className="absolute border-2 border-blue-500 bg-transparent"
-          style={{
-            left: selection.x,
-            top: selection.y,
-            width: selection.width,
-            height: selection.height,
-          }}
-        >
-          {/* 四角手柄 */}
-          <div className="absolute -top-1 -left-1 w-2 h-2 bg-blue-500 rounded-sm" />
-          <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-sm" />
-          <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-blue-500 rounded-sm" />
-          <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-blue-500 rounded-sm" />
-
-          {/* 专家文档建议三：动态尺寸指示器胶囊：绝对定位在当前蓝色选框内部的右下角正下方 */}
-          {selection.width > 0 && selection.height > 0 && (
-            <div 
-              className="absolute px-2 py-1 text-xs font-mono text-white rounded-md select-none pointer-events-none"
-              style={{
-                right: 0,
-                bottom: '-32px', // 向下偏移出选框
-                backgroundColor: 'rgba(0, 0, 0, 0.7)',
-                backdropFilter: 'blur(4px)',
-                zIndex: 10000
-              }}
-            >
-              {Math.round(selection.width)} × {Math.round(selection.height)}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 选区操作阶段的遮罩层 */}
+      {/* ===================== 遮罩层（会镂空） ===================== */}
       {!isRecordingVisuals && (
         <svg className="absolute inset-0 w-full h-full pointer-events-none">
-          {selection ? (
-            <defs>
-              <mask id="selection-mask">
-                <rect width="100%" height="100%" fill="white" />
+          <defs>
+            <mask id="selection-mask">
+              <rect width="100%" height="100%" fill="white" />
+              {selection && (
                 <rect
                   x={selection.x}
                   y={selection.y}
@@ -157,29 +87,59 @@ export default function AreaOverlay({ onConfirm, onCancel }: AreaOverlayProps) {
                   height={selection.height}
                   fill="black"
                 />
-              </mask>
-            </defs>
-          ) : (
-            <defs>
-              <mask id="selection-mask">
-                <rect width="100%" height="100%" fill="black" />
-              </mask>
-            </defs>
-          )}
-          <rect width="100%" height="100%" fill="rgba(0, 0, 0, 0.5)" mask="url(#selection-mask)" />
+              )}
+            </mask>
+          </defs>
+          <rect width="100%" height="100%" fill="rgba(0,0,0,0.5)" mask="url(#selection-mask)" />
         </svg>
       )}
 
-      {/* 选区操作阶段的操作提示顶部胶囊 */}
+      {/* ===================== 永远可见的顶部提示栏（不参与镂空！） ===================== */}
       {!isRecordingVisuals && (
-        <div className="fixed top-8 left-1/2 -translate-x-1/2 bg-black/80 backdrop-blur-sm text-white px-6 py-3 rounded-full text-sm flex items-center gap-4 shadow-lg">
-          <span>🖱️ 拖拽以选择录制区域</span>
-          <span className="text-white/40">|</span>
-          <span className="text-green-400 font-medium">↵ Enter 确认</span>
-          <span className="text-white/40">|</span>
-          <span className="text-red-400 font-medium">Esc 取消</span>
+        <div className="fixed top-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full text-sm text-white flex gap-6"
+            style={{
+              // 👇 更强的深色半透底，永远可见
+              backgroundColor: 'rgba(30, 30, 30, 0.92)',
+              border: '2px solid rgba(255, 255, 255, 0.45)', // 加一圈极细白边
+              backdropFilter: 'blur(10px)',
+              zIndex: 10001,
+            }}>
+          <span className="flex items-center gap-2"><SquareMousePointer size={16} /> 拖拽选择录制区域</span>
+          <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Enter</kbd> 确认</span>
+          <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Esc</kbd> 取消</span>
         </div>
       )}
+
+      {/* 录制中遮罩 */}
+      {isRecordingVisuals && selection && (
+        <svg className="absolute inset-0 w-full h-full pointer-events-none">
+          <defs>
+            <mask id="recording-hole">
+              <rect width="100%" height="100%" fill="white" />
+              <rect x={selection.x} y={selection.y} width={selection.width} height={selection.height} fill="black" />
+            </mask>
+          </defs>
+          <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" mask="url(#recording-hole)" />
+        </svg>
+      )}
+
+      {/* 选框 */}
+      {!isRecordingVisuals && selection && (
+        <div className="absolute border-2 border-blue-500 bg-transparent"
+             style={{ left: selection.x, top: selection.y, width: selection.width, height: selection.height }}>
+          <div className="absolute -top-1 -left-1 w-2 h-2 bg-blue-500 rounded-sm" />
+          <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-sm" />
+          <div className="absolute -bottom-1 -left-1 w-2 h-2 bg-blue-500 rounded-sm" />
+          <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-blue-500 rounded-sm" />
+
+          {/* 内部尺寸提示 */}
+          <div className="absolute right-2 bottom-2 px-2 py-1 text-xs font-mono text-white rounded-md"
+               style={{ backgroundColor: 'rgba(40,40,40,0.85)', backdropFilter: 'blur(4px)' }}>
+            {Math.round(selection.width * window.devicePixelRatio)} × {Math.round(selection.height * window.devicePixelRatio)}
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

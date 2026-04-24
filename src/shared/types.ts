@@ -14,7 +14,7 @@ export type RecordingSource = 'display' | 'window' | 'area' | 'camera'
 
 export type RecordingQuality = '720p' | '1080p' | '1080p60'
 
-export type RecordingStatus = 'idle' | 'countdown' | 'recording' | 'paused'
+export type RecordingStatus = 'idle' | 'countdown' | 'recording' | 'paused' | 'processing'
 
 export interface AppSettings {
   quality: RecordingQuality
@@ -32,7 +32,7 @@ export interface AppState {
   selectedSourceId: string | null
   microphoneEnabled: boolean
   systemAudioEnabled: boolean
-  cameraEnabled: boolean
+  pipEnabled: boolean
   settings: AppSettings
   countdownValue: number
   recordingDuration: number

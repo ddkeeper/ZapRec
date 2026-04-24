@@ -4,13 +4,14 @@ import { useAppStore } from '../store/useAppStore'
 export function useRecordingCountdown() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const startCountdown = useCallback((onComplete: () => void) => {
+  const startCountdown = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current)
 
     const store = useAppStore.getState()
     const countdownSeconds = store.settings.countdown || 3
 
     store.setCountdownValue(countdownSeconds)
+    store.setIsCountdownFinished(false)
     store.setStatus('countdown')
 
     let count = countdownSeconds
@@ -23,12 +24,12 @@ export function useRecordingCountdown() {
       }
 
       count--
-      if (count <= 0) {
+      if (count > 0) {
+        useAppStore.getState().setCountdownValue(count)
+      } else {
         if (timerRef.current) clearInterval(timerRef.current)
         timerRef.current = null
-        onComplete()
-      } else {
-        useAppStore.getState().setCountdownValue(count)
+        useAppStore.getState().setIsCountdownFinished(true)
       }
     }, 1000)
   }, [])

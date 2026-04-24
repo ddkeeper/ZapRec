@@ -14,6 +14,7 @@ declare global {
       selectDirectory: () => Promise<string | null>
       windowMinimize: () => Promise<void>
       windowClose: () => Promise<void>
+      resizeToolbar: (width: number, height: number) => void
       startAreaSelection: () => void
       cancelAreaSelection: () => void
       sendAreaSelected: (area: { x: number; y: number; width: number; height: number }) => void
@@ -21,6 +22,8 @@ declare global {
       onAreaSelectionCancelled: (callback: () => void) => () => void
       onSwitchToRecordingVisuals: (callback: () => void) => () => void
       sendRecordingStopped: () => void
+      requestRecordingStop: () => void
+      onRecordingStopRequested: (callback: () => void) => () => void
       onShortcutToggleRecord: (callback: () => void) => () => void
       onShortcutTogglePause: (callback: () => void) => () => void
       startWindowPicker: () => void
@@ -33,6 +36,28 @@ declare global {
       sendCameraSettingsConfirmed: (settings: CameraSettings) => void
       onCameraSettingsConfirmed: (callback: (settings: CameraSettings) => void) => () => void
       onCameraPreviewCancelled: (callback: () => void) => () => void
+      setCameraPreviewMode: (mode: 'preview' | 'recording') => void
+      closeCameraPreviewWindow: () => void
+      setCameraSize: (size: 'sm' | 'md' | 'lg') => void
+      hideCameraWindow: () => void
+      showCameraWindow: () => void
+      onCameraPreviewModeChanged: (callback: (mode: 'preview' | 'recording') => void) => () => void
+      onCameraPreviewDestroyStream: (callback: () => void) => () => void
+      onCameraWindowShow: (callback: () => void) => () => void
+      openPipWindow: () => void
+      closePipWindow: () => void
+      setPipShape: (shape: 'circle' | 'rectangle') => void
+      setPipSize: (size: 'sm' | 'md' | 'lg') => void
+      onPipClosed: (callback: () => void) => () => void
+      onPipSizeChanged: (callback: (size: 'sm' | 'md' | 'lg') => void) => () => void
+      onPipShapeChanged: (callback: (shape: 'circle' | 'rectangle') => void) => () => void
+      processAreaCrop: (params: { filePath: string; cropParams: string }) => void
+      onCropFinished: (callback: (filePath: string) => void) => () => void
+      onCropFailed: (callback: (error: string) => void) => () => void
+      processSegmentsConcat: (params: { segments: string[], finalPath: string }) => void
+      onConcatFinished: (callback: (filePath: string | null) => void) => () => void
+      onConcatFailed: (callback: (error: string) => void) => () => void
+      renameFile: (oldPath: string, newPath: string) => void
     }
   }
 }
@@ -71,19 +96,24 @@ export class MediaCapturer {
     return devices.filter(device => device.kind === 'audioinput')
   }
 
-  async startDisplayCapture(sourceId: string): Promise<MediaStream> {
+async startDisplayCapture(
+    sourceId: string,
+    width?: number,
+    height?: number
+  ): Promise<MediaStream> {
     this.stopDisplayCapture()
     
+    const maxWidth = width || 1920
+    const maxHeight = height || 1080
+
     const constraints: MediaStreamConstraints = {
-      audio: false,
+      audio: { mandatory: { chromeMediaSource: 'desktop' } } as MediaTrackConstraints,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: sourceId,
-          minWidth: 1280,
-          maxWidth: 3840,
-          minHeight: 720,
-          maxHeight: 2160
+          maxWidth,
+          maxHeight
         }
       } as MediaTrackConstraints
     }
@@ -97,7 +127,7 @@ export class MediaCapturer {
     this.targetWindowId = windowId
 
     const constraints: MediaStreamConstraints = {
-      audio: false,
+      audio: { mandatory: { chromeMediaSource: 'desktop' } } as MediaTrackConstraints,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
@@ -125,8 +155,12 @@ export class MediaCapturer {
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
-        sampleRate: 48000
-      },
+        autoGainControl: true,
+        sampleRate: 48000,
+        googNoiseSuppression2: true,
+        googHighpassFilter: false,
+        googTypingNoiseDetection: false
+      } as any,
       video: false
     })
     
@@ -185,6 +219,10 @@ export class MediaCapturer {
 
   getMicrophoneStream(): MediaStream | null {
     return this.microphoneStream
+  }
+
+  getCameraStream(): MediaStream | null {
+    return this.cameraStream
   }
 }
 

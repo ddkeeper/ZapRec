@@ -1,7 +1,10 @@
-import { useCallback, useState, useEffect } from 'react'
+import { useCallback, useState, useEffect, useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
 import type { RecordingSource } from '../shared/types'
 import { useRecordingCountdown } from '../hooks/useRecordingCountdown'
+import { audioMixer } from '../core/AudioMixer'
+import { cancelPreWarming, startPreWarming } from '../core/recordingPreWarming'
+import { recordingEngine } from '../core/RecordingEngine'
 import { 
   Settings, 
   Monitor, 
@@ -50,14 +53,36 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
     setMicrophoneEnabled,
     systemAudioEnabled,
     setSystemAudioEnabled,
-    cameraEnabled,
-    setCameraEnabled
+    pipEnabled,
+    setPipEnabled,
+    pipButtonDisabled,
+    isPaused,
+    setIsPaused,
+    setStatus
   } = useAppStore()
 
   const { startCountdown } = useRecordingCountdown()
 
   const [recordingTime, setRecordingTime] = useState(0)
-  const [isPaused, setIsPaused] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const rect = entry.target.getBoundingClientRect()
+        const width = Math.ceil(rect.width) + 2
+        const height = Math.ceil(rect.height) + 2
+        if (window.caplet?.resizeToolbar) {
+          window.caplet.resizeToolbar(width, height)
+        }
+      }
+    })
+
+    observer.observe(containerRef.current)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     if (isRecording && !isPaused) {
@@ -65,7 +90,7 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
         setRecordingTime(prev => prev + 1)
       }, 1000)
       return () => clearInterval(timer)
-    } else if (!isRecording) {
+    } else if (!isRecording && !isPaused) {
       setRecordingTime(0)
     }
   }, [isRecording, isPaused])
@@ -74,7 +99,8 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
     const unlisten = window.caplet.onAreaSelected((area) => {
       setPendingAreaSelection(area)
       setSelectedSource('area')
-      startCountdown(() => onStartRecording())
+      startPreWarming()
+      startCountdown()
     })
     
     return () => unlisten()
@@ -97,30 +123,44 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
     }
     
     if (source === 'window') {
+      const store = useAppStore.getState()
+      if (store.pipEnabled) {
+        store.setSavedPipEnabled(true)
+        store.setPipEnabled(false)
+      }
+      store.setPipButtonDisabled(true)
       setSelectedSource(source)
       onOpenWindowPicker?.()
       return
     }
 
     if (source === 'camera') {
+      const store = useAppStore.getState()
+      if (store.pipEnabled) {
+        store.setSavedPipEnabled(true)
+        store.setPipEnabled(false)
+      }
+      store.setPipButtonDisabled(true)
       setSelectedSource(source)
       window.caplet.startCameraPreview()
       return
     }
     
     setSelectedSource(source)
-    startCountdown(() => onStartRecording())
+    startPreWarming()
+    startCountdown()
   }, [status, setSelectedSource, startCountdown, onStartRecording, onOpenWindowPicker])
 
   const handleRecordToggle = useCallback(() => {
-    if (isRecording) {
+    if (isRecording || isPaused) {
       onStopRecording()
     }
-  }, [isRecording, onStopRecording])
+  }, [isRecording, isPaused, onStopRecording])
 
   return (
     <div 
-      className="w-max flex items-center h-14 px-3 rounded-2xl overflow-hidden select-none transition-all duration-300"
+      ref={containerRef}
+      className="inline-flex items-center h-14 px-3 rounded-2xl overflow-hidden select-none transition-all duration-300"
       style={{
         backgroundColor: 'rgba(0, 0, 0, 0.6)',
         backdropFilter: 'blur(48px)',
@@ -145,7 +185,7 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
       </button>
 
       {/* 分割线1 */}
-      <div className="w-px h-8 bg-white/30 mx-3 shrink-0" />
+      <div className="h-8 border-l-2 border-white/30 mx-3 shrink-0" />
 
       {/* 中间：录制源 或 计时器+控制 */}
       <div className="flex items-center justify-center gap-1 min-w-[220px]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -156,10 +196,8 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
               <div 
                 className="w-2.5 h-2.5 rounded-full"
                 style={{ 
-                  backgroundColor: status === 'paused' ? '#fbbf24' : '#ef4444',
-                  boxShadow: status === 'paused' 
-                    ? '0 0 8px rgba(251,191,36,0.8)' 
-                    : '0 0 8px rgba(239,68,68,0.8)'
+                  backgroundColor: '#ef4444',
+                  boxShadow: '0 0 8px rgba(239,68,68,0.8)'
                 }}
               />
               <span className="font-mono text-white text-sm font-medium tracking-wide">
@@ -168,7 +206,28 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
             </div>
             {/* 暂停/恢复 */}
             <button
-              onClick={() => setIsPaused(!isPaused)}
+              onClick={() => {
+                const newPaused = !isPaused
+                setIsPaused(newPaused)
+                setStatus(newPaused ? 'paused' : 'recording')
+
+                recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+                  if (newPaused) {
+                    const segmentPath = await recordingEngine.pause()
+                    await window.caplet.streamEnd()
+                    if (segmentPath) {
+                      useAppStore.getState().addRecordingSegment(segmentPath)
+                    }
+                  } else {
+                    const nextSegmentPath = recordingEngine.generateNextSegmentPath()
+                    if (nextSegmentPath) {
+                      recordingEngine.setFilePath(nextSegmentPath)
+                      await window.caplet.streamStart(nextSegmentPath)
+                    }
+                    await recordingEngine.resume()
+                  }
+                }).catch(console.error)
+              }}
               className="p-2 rounded-md hover:bg-white/10 text-white/90 transition-colors"
               title={isPaused ? "恢复" : "暂停"}
             >
@@ -197,17 +256,27 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
               <button
                 onClick={() => {
                   const store = useAppStore.getState()
-                  
-                  store.setStatus('idle')
-                  store.setCountdownValue(0)
-                  
-                  if (store.selectedSource === 'area') {
+                  const source = store.selectedSource
+
+                  cancelPreWarming()
+
+                  if (source === 'area') {
                     window.caplet.cancelAreaSelection()
-                    store.setPendingAreaSelection(null)
-                  } else if (store.selectedSource === 'window') {
+                  } else if (source === 'window') {
+                    window.caplet.cancelWindowPicker()
                     store.setSelectedWindow(null)
-                  } else if (store.selectedSource === 'camera') {
+                    if (store.savedPipEnabled) {
+                      store.setPipEnabled(true)
+                    }
+                    store.setSavedPipEnabled(null)
+                    store.setPipButtonDisabled(false)
+                  } else if (source === 'camera') {
                     store.setPendingCameraSettings(null)
+                    if (store.savedPipEnabled) {
+                      store.setPipEnabled(true)
+                    }
+                    store.setSavedPipEnabled(null)
+                    store.setPipButtonDisabled(false)
                   }
                 }}
                 className="p-1 text-gray-400 hover:text-white hover:bg-white/10 rounded-md transition-all"
@@ -245,12 +314,18 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
       </div>
 
       {/* 分割线2 */}
-      <div className="w-px h-8 bg-white/30 mx-3 shrink-0" />
+      <div className="h-8 border-l-2 border-white/30 mx-3 shrink-0" />
 
       {/* 右侧：音频开关 - 始终显示 */}
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <button
-          onClick={() => setMicrophoneEnabled(!microphoneEnabled)}
+          onClick={() => {
+            const newValue = !microphoneEnabled
+            setMicrophoneEnabled(newValue)
+            if (status === 'recording' || status === 'countdown') {
+              audioMixer.setGain('microphone', newValue ? 1 : 0)
+            }
+          }}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 hover:bg-white/10"
           title={microphoneEnabled ? "麦克风：关闭" : "麦克风：开启"}
         >
@@ -264,7 +339,13 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
         </button>
 
         <button
-          onClick={() => setSystemAudioEnabled(!systemAudioEnabled)}
+          onClick={() => {
+            const newValue = !systemAudioEnabled
+            setSystemAudioEnabled(newValue)
+            if (status === 'recording' || status === 'countdown') {
+              audioMixer.setGain('system', newValue ? 1 : 0)
+            }
+          }}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 hover:bg-white/10"
           title={systemAudioEnabled ? "系统声音：关闭" : "系统声音：开启"}
         >
@@ -278,26 +359,31 @@ export default function Toolbar({ onStartRecording, onStopRecording, isRecording
         </button>
 
         <button
-          onClick={() => setCameraEnabled(!cameraEnabled)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 hover:bg-white/10"
-          title={cameraEnabled ? "画中画：关闭" : "画中画：开启"}
+          onClick={() => !pipButtonDisabled && setPipEnabled(!pipEnabled)}
+          disabled={pipButtonDisabled}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 ${
+            pipButtonDisabled
+              ? 'opacity-30 cursor-not-allowed'
+              : 'hover:bg-white/10'
+          }`}
+          title={pipButtonDisabled ? "录制中不可用" : pipEnabled ? "画中画：关闭" : "画中画：开启"}
         >
-          <SquareUser size={18} strokeWidth={2} color={cameraEnabled ? 'white' : 'rgba(255,255,255,0.4)'} />
-          <span className={`text-sm whitespace-nowrap font-medium ${cameraEnabled ? 'text-white' : 'text-white/40'}`}>
+          <SquareUser size={18} strokeWidth={2} color={pipEnabled && !pipButtonDisabled ? 'white' : 'rgba(255,255,255,0.4)'} />
+          <span className={`text-sm whitespace-nowrap font-medium ${pipEnabled && !pipButtonDisabled ? 'text-white' : 'text-white/40'}`}>
             画中画
           </span>
         </button>
       </div>
 
       {/* 分割线3 */}
-      <div className="w-px h-8 bg-white/30 mx-3 shrink-0" />
+      <div className="h-8 border-l-2 border-white/30 mx-3 shrink-0" />
 
       {/* 关闭按钮 */}
       <button
-        onClick={() => window.caplet.windowClose()}
+        onClick={() => window.caplet.windowMinimize()}
         className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-white/10 text-white/90 transition-colors shrink-0"
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        title="关闭"
+        title="最小化到托盘"
       >
         <X size={18} strokeWidth={2} />
       </button>

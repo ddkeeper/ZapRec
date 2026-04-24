@@ -12,6 +12,7 @@ const api = {
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowClose: () => ipcRenderer.invoke('window-close'),
+  resizeToolbar: (width: number, height: number) => ipcRenderer.send('resize-toolbar', { width, height }),
 
   startAreaSelection: () => ipcRenderer.send('start-area-selection'),
   cancelAreaSelection: () => ipcRenderer.send('cancel-area-selection'),
@@ -35,6 +36,13 @@ const api = {
   },
   
   sendRecordingStopped: () => ipcRenderer.send('recording-stopped'),
+  requestRecordingStop: () => ipcRenderer.send('request-recording-stop'),
+
+  onRecordingStopRequested: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('recording-stop-requested', handler)
+    return () => ipcRenderer.removeListener('recording-stop-requested', handler)
+  },
 
   onShortcutToggleRecord: (callback: () => void) => {
     const handler = () => callback()
@@ -79,7 +87,84 @@ const api = {
     const handler = () => callback()
     ipcRenderer.on('camera-preview-cancelled', handler)
     return () => ipcRenderer.removeListener('camera-preview-cancelled', handler)
-  }
+  },
+
+  setCameraPreviewMode: (mode: 'preview' | 'recording') => ipcRenderer.send('set-camera-preview-mode', mode),
+  closeCameraPreviewWindow: () => ipcRenderer.send('close-camera-preview-window'),
+  setCameraSize: (size: 'sm' | 'md' | 'lg') => ipcRenderer.send('set-camera-size', size),
+  hideCameraWindow: () => ipcRenderer.send('hide-camera-window'),
+  showCameraWindow: () => ipcRenderer.send('show-camera-window'),
+
+  onCameraPreviewModeChanged: (callback: (mode: 'preview' | 'recording') => void) => {
+    const handler = (_: unknown, mode: 'preview' | 'recording') => callback(mode)
+    ipcRenderer.on('camera-preview-mode-changed', handler)
+    return () => ipcRenderer.removeListener('camera-preview-mode-changed', handler)
+  },
+
+  onCameraPreviewDestroyStream: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('camera-preview-destroy-stream', handler)
+    return () => ipcRenderer.removeListener('camera-preview-destroy-stream', handler)
+  },
+
+  onCameraWindowShow: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('camera-window-show', handler)
+    return () => ipcRenderer.removeListener('camera-window-show', handler)
+  },
+
+  openPipWindow: () => ipcRenderer.send('open-pip'),
+  closePipWindow: () => ipcRenderer.send('close-pip'),
+  setPipShape: (shape: 'circle' | 'rectangle') => ipcRenderer.send('set-pip-shape', shape),
+  setPipSize: (size: 'sm' | 'md' | 'lg') => ipcRenderer.send('set-pip-size', size),
+
+  onPipClosed: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('pip-closed', handler)
+    return () => ipcRenderer.removeListener('pip-closed', handler)
+  },
+
+  onPipSizeChanged: (callback: (size: 'sm' | 'md' | 'lg') => void) => {
+    const handler = (_: unknown, size: 'sm' | 'md' | 'lg') => callback(size)
+    ipcRenderer.on('pip-size-changed', handler)
+    return () => ipcRenderer.removeListener('pip-size-changed', handler)
+  },
+
+  onPipShapeChanged: (callback: (shape: 'circle' | 'rectangle') => void) => {
+    const handler = (_: unknown, shape: 'circle' | 'rectangle') => callback(shape)
+    ipcRenderer.on('pip-shape-changed', handler)
+    return () => ipcRenderer.removeListener('pip-shape-changed', handler)
+  },
+
+  processAreaCrop: (params: { filePath: string; cropParams: string }) => ipcRenderer.send('process-area-crop', params),
+  
+  onCropFinished: (callback: (filePath: string) => void) => {
+    const handler = (_: unknown, filePath: string) => callback(filePath)
+    ipcRenderer.on('crop-finished', handler)
+    return () => ipcRenderer.removeListener('crop-finished', handler)
+  },
+  
+  onCropFailed: (callback: (error: string) => void) => {
+    const handler = (_: unknown, error: string) => callback(error)
+    ipcRenderer.on('crop-failed', handler)
+    return () => ipcRenderer.removeListener('crop-failed', handler)
+  },
+
+  processSegmentsConcat: (params: { segments: string[], finalPath: string, cropParams?: string }) => ipcRenderer.send('process-segments-concat', params),
+
+  onConcatFinished: (callback: (filePath: string | null) => void) => {
+    const handler = (_: unknown, filePath: string | null) => callback(filePath)
+    ipcRenderer.on('concat-finished', handler)
+    return () => ipcRenderer.removeListener('concat-finished', handler)
+  },
+
+  onConcatFailed: (callback: (error: string) => void) => {
+    const handler = (_: unknown, error: string) => callback(error)
+    ipcRenderer.on('concat-failed', handler)
+    return () => ipcRenderer.removeListener('concat-failed', handler)
+  },
+
+  renameFile: (oldPath: string, newPath: string) => ipcRenderer.send('rename-file', { oldPath, newPath })
 }
 
 contextBridge.exposeInMainWorld('caplet', api)

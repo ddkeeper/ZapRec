@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { DesktopSource } from '../shared/types'
+import { LayoutGrid } from 'lucide-react'
 
 interface WindowPickerProps {
   onSelect: (window: DesktopSource) => void
@@ -12,7 +13,11 @@ export default function WindowPicker({ onSelect, onCancel }: WindowPickerProps) 
   const [hoveredWindow, setHoveredWindow] = useState<string | null>(null)
 
   useEffect(() => {
-    loadWindows()
+    const timer = setTimeout(() => {
+      loadWindows()
+    }, 100)
+
+    return () => clearTimeout(timer)
   }, [])
 
   const loadWindows = async () => {
@@ -50,38 +55,22 @@ export default function WindowPicker({ onSelect, onCancel }: WindowPickerProps) 
         WebkitBackdropFilter: 'blur(8px)',
       }}
     >
-      <div 
-        className="w-[900px] h-[70vh] min-h-[500px] rounded-2xl overflow-hidden flex flex-col shadow-2xl"
+      {/* 顶部提示 */}
+      <div className="fixed top-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full text-sm text-white flex gap-6"
+        style={{ backgroundColor: 'rgba(30, 30, 30, 0.92)', border: '2px solid rgba(255, 255, 255, 0.45)', backdropFilter: 'blur(10px)', zIndex: 10001 }}>
+        <span className="flex items-center gap-2"><LayoutGrid size={16} /> 选择要录制的窗口</span>
+        <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Esc</kbd> 取消</span>
+      </div>
+
+      {/* 窗口选择对话框 */}
+      <div
+        className="w-[800px] h-[50vh] min-h-[400px] rounded-2xl overflow-hidden flex flex-col shadow-2xl"
         style={{
           backgroundColor: 'rgba(28, 28, 30, 0.95)',
           border: '1px solid rgba(255, 255, 255, 0.08)',
         }}
       >
-        <div 
-          className="flex items-center justify-between px-6 py-4 shrink-0"
-          style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.06)' }}
-        >
-          <div className="flex items-center gap-3">
-            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#e4e4e7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="4" width="20" height="16" rx="2" />
-              <path d="M10 4v4" />
-              <path d="M2 8h20" />
-              <path d="M6 4v4" />
-            </svg>
-            <h2 className="text-zinc-200 text-lg font-medium tracking-wide">选择窗口</h2>
-          </div>
-          <button
-            onClick={onCancel}
-            className="w-8 h-8 rounded-md flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition-all"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="p-5 overflow-y-auto flex-1 bg-black/20">
+        <div className="p-4 overflow-y-auto flex-1 bg-black/20">
           {loading ? (
             <div className="w-full h-full flex flex-col items-center justify-center gap-4">
               <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -92,7 +81,7 @@ export default function WindowPicker({ onSelect, onCancel }: WindowPickerProps) 
               <span className="text-zinc-500 text-sm">未检测到可录制的窗口（最小化的窗口无法录制）</span>
             </div>
           ) : (
-            <div className="grid grid-cols-3 gap-5">
+            <div className="grid grid-cols-3 gap-4">
               {windows.map((win) => (
                 <button
                   key={win.id}

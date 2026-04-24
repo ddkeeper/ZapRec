@@ -2,6 +2,19 @@ import { app, BrowserWindow, ipcMain, desktopCapturer, Tray, Menu, globalShortcu
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
+import ffmpeg from 'fluent-ffmpeg'
+
+const getFFmpegPath = (): string => {
+  const isPacked = app.isPackaged
+  
+  if (isPacked) {
+    return path.join(process.resourcesPath, 'ffmpeg-static', 'ffmpeg.exe')
+  } else {
+    return path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
+  }
+}
+
+ffmpeg.setFfmpegPath(getFFmpegPath())
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -27,8 +40,19 @@ let mainWindow: BrowserWindow | null = null
 let selectionWindow: BrowserWindow | null = null
 let windowPickerWindow: BrowserWindow | null = null
 let cameraPreviewWindow: BrowserWindow | null = null
+let cameraRecordingWindow: BrowserWindow | null = null
+let cameraPreviewConfirming = false
+let currentCameraDeviceId = ''
+let pipWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let writeStream: fs.WriteStream | null = null
+
+const CAMERA_SIZES = {
+  sm: 140,
+  md: 200,
+  lg: 300
+}
+let currentCameraSizeTier: 'sm' | 'md' | 'lg' = 'md'
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
 
@@ -91,6 +115,7 @@ function createWindow() {
     // 级联生命周期管理：主窗口关闭时同步销毁所有附属窗口
     destroySelectionWindow()
     destroyWindowPickerWindow()
+    destroyPipWindow()
   })
 
   mainWindow.on('closed', () => {
@@ -115,6 +140,11 @@ function createTray() {
   
   const contextMenu = Menu.buildFromTemplate([
     { label: '显示主窗口', click: () => mainWindow?.show() },
+    { label: '显示摄像头小窗', click: () => {
+      if (cameraRecordingWindow && !cameraRecordingWindow.isVisible()) {
+        cameraRecordingWindow.show()
+      }
+    }},
     { type: 'separator' },
     { label: '退出', click: () => app.quit() }
   ])
@@ -200,6 +230,17 @@ ipcMain.handle('stream-end', async () => {
   })
 })
 
+ipcMain.on('rename-file', (_, { oldPath, newPath }: { oldPath: string, newPath: string }) => {
+  try {
+    if (fs.existsSync(oldPath)) {
+      fs.renameSync(oldPath, newPath)
+      console.log('[Main] File renamed:', oldPath, '->', newPath)
+    }
+  } catch (err) {
+    console.error('[Main] Failed to rename file:', err)
+  }
+})
+
 ipcMain.handle('show-item-in-folder', (_, filepath: string) => {
   shell.showItemInFolder(filepath)
 })
@@ -221,6 +262,12 @@ ipcMain.handle('window-minimize', () => {
 
 ipcMain.handle('window-close', () => {
   mainWindow?.close()
+})
+
+ipcMain.on('resize-toolbar', (_, { width, height }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setSize(width, height)
+  }
 })
 
 function createSelectionWindow() {
@@ -295,8 +342,18 @@ function createSelectionWindow() {
 
 function destroySelectionWindow() {
   if (selectionWindow) {
-    selectionWindow.close()
+    selectionWindow.setOpacity(0)
+    selectionWindow.setIgnoreMouseEvents(true)
+    selectionWindow.setAlwaysOnTop(false)
+
+    const winToDestroy = selectionWindow
     selectionWindow = null
+
+    setTimeout(() => {
+      if (!winToDestroy.isDestroyed()) {
+        winToDestroy.destroy()
+      }
+    }, 100)
   }
 }
 
@@ -308,6 +365,10 @@ function createWindowPickerWindow() {
     windowPickerWindow.close()
   }
 
+  const rawUrl = mainWindow?.webContents.getURL() || ''
+  const baseUrl = rawUrl.split('#')[0]
+  const pickerUrl = `${baseUrl}#/window-picker`
+
   const { x, y, width, height } = screen.getPrimaryDisplay().bounds
 
   windowPickerWindow = new BrowserWindow({
@@ -317,7 +378,6 @@ function createWindowPickerWindow() {
     height,
     transparent: true,
     frame: false,
-    //thickFrame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
@@ -330,7 +390,6 @@ function createWindowPickerWindow() {
     maxWidth: width,
     minHeight: height,
     maxHeight: height,
-    show: false, // 先创建后加载，避免加载时的闪烁和系统边框
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -343,18 +402,7 @@ function createWindowPickerWindow() {
   windowPickerWindow.setMovable(false)
   windowPickerWindow.setAlwaysOnTop(true, 'screen-saver')
 
-  // 核心修改 2：当页面完成首次视觉绘制（HTML/CSS 已经撑满全屏）时，瞬间显示窗口
-  windowPickerWindow.once('ready-to-show', () => {
-    if (windowPickerWindow) {
-      windowPickerWindow.show()
-    }
-  })
-  
-  if (VITE_DEV_SERVER_URL) {
-    windowPickerWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/window-picker.html`)
-  } else {
-    windowPickerWindow.loadFile(path.join(__dirname, '../../dist/window-picker.html'))
-  }
+  windowPickerWindow.loadURL(pickerUrl)
 
   if (process.platform === 'win32') {
     windowPickerWindow.hookWindowMessage(0x0084, (_e, result) => {
@@ -395,15 +443,10 @@ function createCameraPreviewWindow() {
     alwaysOnTop: true,
     skipTaskbar: true,
     hasShadow: false,
-    movable: false,
+    movable: true,
     resizable: false,
     minimizable: false,
     maximizable: false,
-    type: 'toolbar',
-    minWidth: width,
-    maxWidth: width,
-    minHeight: height,
-    maxHeight: height,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
@@ -413,7 +456,7 @@ function createCameraPreviewWindow() {
   })
 
   cameraPreviewWindow.setResizable(false)
-  cameraPreviewWindow.setMovable(false)
+  cameraPreviewWindow.setAspectRatio(16 / 9)
   cameraPreviewWindow.setAlwaysOnTop(true, 'screen-saver')
 
   if (VITE_DEV_SERVER_URL) {
@@ -422,16 +465,119 @@ function createCameraPreviewWindow() {
     cameraPreviewWindow.loadFile(path.join(__dirname, '../../dist/camera-preview.html'))
   }
 
-  if (process.platform === 'win32') {
-    cameraPreviewWindow.hookWindowMessage(0x0084, (_e, result) => {
-      result.writeInt32LE(1, 0)
-      return true
+  cameraPreviewWindow.on('closed', () => {
+    const wasConfirming = cameraPreviewConfirming
+    cameraPreviewWindow = null
+    cameraPreviewConfirming = false
+    if (!wasConfirming && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('camera-preview-cancelled')
+    }
+  })
+}
+
+// ============================================
+// 画中画悬浮窗
+// ============================================
+const PIP_SIZES = {
+  sm: 140,
+  md: 200,
+  lg: 300
+}
+
+let currentShape: 'rectangle' | 'circle' = 'rectangle'
+let currentSize: 'sm' | 'md' | 'lg' = 'md'
+
+function updatePipBounds(sizeTier: 'sm' | 'md' | 'lg') {
+  if (!pipWindow) return
+
+  const baseHeight = PIP_SIZES[sizeTier]
+  const bounds = pipWindow.getBounds()
+
+  let newWidth: number
+  let newHeight: number
+
+  if (currentShape === 'circle') {
+    pipWindow.setAspectRatio(1)
+    newWidth = baseHeight
+    newHeight = baseHeight
+  } else {
+    pipWindow.setAspectRatio(16 / 9)
+    newHeight = baseHeight
+    newWidth = Math.round(baseHeight * (16 / 9))
+  }
+
+  pipWindow.setBounds({
+    x: Math.round(bounds.x + (bounds.width - newWidth) / 2),
+    y: Math.round(bounds.y + (bounds.height - newHeight) / 2),
+    width: newWidth,
+    height: newHeight
+  })
+}
+
+function createPipWindow() {
+  if (pipWindow) return
+
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize
+
+  const initialWidth = Math.round(PIP_SIZES.md * (16 / 9))
+  const initialHeight = PIP_SIZES.md
+
+  pipWindow = new BrowserWindow({
+    width: initialWidth,
+    height: initialHeight,
+    x: screenWidth - initialWidth - 50,
+    y: screenHeight - initialHeight - 50,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    hasShadow: false,
+    skipTaskbar: true,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  pipWindow.setAspectRatio(16 / 9)
+  pipWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  if (VITE_DEV_SERVER_URL) {
+    pipWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/pip-window.html`)
+  } else {
+    pipWindow.loadFile(path.join(__dirname, '../../dist/pip-window.html'))
+  }
+
+  if (VITE_DEV_SERVER_URL) {
+    pipWindow.webContents.on('did-fail-load', (_, errorCode, errorDescription) => {
+      console.error('[PipWindow] Failed to load:', errorCode, errorDescription)
+    })
+    pipWindow.webContents.on('console-message', (_, level, message) => {
+      const levels = ['verbose', 'info', 'warning', 'error']
+      console.log(`[PipWindow Renderer ${levels[level]}]:`, message)
+    })
+    pipWindow.webContents.on('render-process-gone', (_, details) => {
+      console.error('[PipWindow] Render process gone:', details)
     })
   }
 
-  cameraPreviewWindow.on('closed', () => {
-    cameraPreviewWindow = null
+  pipWindow.on('closed', () => {
+    pipWindow = null
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('pip-closed')
+    }
   })
+}
+
+function destroyPipWindow() {
+  if (pipWindow) {
+    pipWindow.close()
+    pipWindow = null
+  }
 }
 
 // ============================================
@@ -473,23 +619,122 @@ ipcMain.on('start-camera-preview', () => {
 ipcMain.on('cancel-camera-preview', () => {
   if (cameraPreviewWindow) {
     cameraPreviewWindow.close()
-    cameraPreviewWindow = null
   }
   if (mainWindow) {
     mainWindow.show()
-    mainWindow.webContents.send('camera-preview-cancelled')
   }
 })
 
 ipcMain.on('camera-settings-confirmed', (_, settings: { deviceId: string }) => {
-  if (cameraPreviewWindow) {
-    cameraPreviewWindow.close()
-    cameraPreviewWindow = null
-  }
+  cameraPreviewConfirming = true
+  currentCameraDeviceId = settings.deviceId
   if (mainWindow) {
     mainWindow.show()
     mainWindow.webContents.send('camera-settings-confirmed', settings)
   }
+  if (cameraPreviewWindow) {
+    cameraPreviewWindow.close()
+    cameraPreviewWindow = null
+  }
+})
+
+ipcMain.on('set-camera-size', (_, sizeTier: 'sm' | 'md' | 'lg') => {
+  if (!cameraRecordingWindow) return
+  currentCameraSizeTier = sizeTier
+  const h = CAMERA_SIZES[sizeTier]
+  const w = Math.round(h * (16 / 9))
+  const bounds = cameraRecordingWindow.getBounds()
+  cameraRecordingWindow.setBounds({
+    x: Math.round(bounds.x + (bounds.width - w) / 2),
+    y: Math.round(bounds.y + (bounds.height - h) / 2),
+    width: w,
+    height: h
+  })
+})
+
+ipcMain.on('hide-camera-window', () => {
+  if (cameraRecordingWindow) {
+    cameraRecordingWindow.hide()
+  }
+})
+
+ipcMain.on('show-camera-window', () => {
+  if (cameraRecordingWindow) return
+
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize
+  const h = CAMERA_SIZES[currentCameraSizeTier]
+  const w = Math.round(h * (16 / 9))
+
+  cameraRecordingWindow = new BrowserWindow({
+    width: w,
+    height: h,
+    x: screenW - w - 50,
+    y: screenH - h - 50,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    hasShadow: false,
+    skipTaskbar: true,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  cameraRecordingWindow.setAspectRatio(16 / 9)
+  cameraRecordingWindow.setAlwaysOnTop(true, 'screen-saver')
+
+  const pagePath = 'camera-preview.html'
+  const query = `?mode=recording&deviceId=${encodeURIComponent(currentCameraDeviceId)}`
+
+  if (VITE_DEV_SERVER_URL) {
+    cameraRecordingWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/${pagePath}${query}`)
+  } else {
+    cameraRecordingWindow.loadFile(path.join(__dirname, `../../dist/${pagePath}`), { search: query })
+  }
+
+  cameraRecordingWindow.on('closed', () => {
+    cameraRecordingWindow = null
+  })
+})
+
+ipcMain.on('close-camera-preview-window', () => {
+  if (cameraPreviewWindow) {
+    cameraPreviewWindow.close()
+    cameraPreviewWindow = null
+  }
+  if (cameraRecordingWindow) {
+    cameraRecordingWindow.close()
+    cameraRecordingWindow = null
+  }
+})
+
+// ============================================
+// 画中画 IPC
+// ============================================
+ipcMain.on('open-pip', () => {
+  createPipWindow()
+})
+
+ipcMain.on('close-pip', () => {
+  destroyPipWindow()
+})
+
+ipcMain.on('set-pip-shape', (_, shape: 'circle' | 'rectangle') => {
+  currentShape = shape
+  updatePipBounds(currentSize)
+  pipWindow?.webContents.send('pip-shape-changed', shape)
+})
+
+ipcMain.on('set-pip-size', (_, size: 'sm' | 'md' | 'lg') => {
+  currentSize = size
+  updatePipBounds(size)
+  pipWindow?.webContents.send('pip-size-changed', size)
 })
 
 
@@ -503,9 +748,9 @@ ipcMain.on('start-area-selection', () => {
 })
 
 ipcMain.on('area-selected', (_, area: { x: number; y: number; width: number; height: number }) => {
-  // 专家体验升级：不销毁遮罩，保留其为阴影幕布，开启鼠标穿透
+  // 保留阴影幕布，完全阻止其接收鼠标事件，避免事件转发导致鼠标状态闪烁
   if (selectionWindow) {
-    selectionWindow.setIgnoreMouseEvents(true, { forward: true })
+    selectionWindow.setIgnoreMouseEvents(true)
     selectionWindow.webContents.send('switch-to-recording-visuals')
   }
 
@@ -525,6 +770,44 @@ ipcMain.on('cancel-area-selection', () => {
 
 ipcMain.on('recording-stopped', () => {
   destroySelectionWindow()
+})
+
+ipcMain.on('request-recording-stop', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('recording-stop-requested')
+  }
+})
+
+ipcMain.on('process-area-crop', async (event, { filePath, cropParams }) => {
+  const dir = path.dirname(filePath) || ''
+  const ext = path.extname(filePath)
+  const basename = path.basename(filePath, ext)
+  const tempFilePath = path.join(dir, `${basename}_temp_crop${ext}`)
+
+  try {
+    ffmpeg(filePath)
+      .videoFilters(`crop=${cropParams}`)
+      .outputOptions([
+        '-c:v libx264',
+        '-preset veryfast',
+        '-crf 17',
+        '-pix_fmt yuv420p',
+        '-c:a copy'
+      ])
+      .save(tempFilePath)
+      .on('end', () => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath)
+        }
+        fs.renameSync(tempFilePath, filePath)
+        event.reply('crop-finished', filePath)
+      })
+      .on('error', (err) => {
+        event.reply('crop-failed', err.message)
+      })
+  } catch (err) {
+    console.error('[ZapRec] FFmpeg execution error:', err)
+  }
 })
 
 app.whenReady().then(() => {
@@ -573,4 +856,50 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
+})
+
+ipcMain.on('process-segments-concat', async (event, { segments, finalPath, cropParams }: { segments: string[], finalPath: string, cropParams?: string }) => {
+  if (!segments || segments.length === 0) {
+    event.reply('concat-finished', null)
+    return
+  }
+
+  const dir = path.dirname(finalPath)
+  const listFilePath = path.join(dir, `concat_list_${Date.now()}.txt`)
+
+  const fileContent = segments
+    .map((p: string) => `file '${p.replace(/'/g, "'\\''")}'`)
+    .join('\n')
+
+  fs.writeFileSync(listFilePath, fileContent)
+
+  const cmd = ffmpeg()
+    .input(listFilePath)
+    .inputOptions(['-f concat', '-safe 0'])
+
+  if (cropParams) {
+    cmd.videoFilters(`crop=${cropParams}`)
+      .outputOptions([
+        '-c:v libx264',
+        '-preset veryfast',
+        '-crf 17',
+        '-pix_fmt yuv420p',
+        '-c:a copy'
+      ])
+  } else {
+    cmd.outputOptions(['-c copy'])
+  }
+
+  cmd.save(finalPath)
+    .on('start', (cmdStr: string) => console.log('[FFmpeg] Concat started:', cmdStr))
+    .on('end', () => {
+      segments.forEach((p: string) => { if (fs.existsSync(p)) fs.unlinkSync(p) })
+      if (fs.existsSync(listFilePath)) fs.unlinkSync(listFilePath)
+      console.log('[FFmpeg] Concat finished:', finalPath)
+      event.reply('concat-finished', finalPath)
+    })
+    .on('error', (err: Error) => {
+      console.error('[FFmpeg] Concat failed:', err)
+      event.reply('concat-failed', err.message)
+    })
 })

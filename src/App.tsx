@@ -2,16 +2,21 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useAppStore } from './store/useAppStore'
 import Toolbar from './components/Toolbar'
 import AreaOverlay, { type AreaSelection } from './components/AreaOverlay'
+import WindowPicker from './components/WindowPicker'
 import CameraPreviewOverlay from './components/CameraPreviewOverlay'
 import { mediaCapturer } from './core/MediaCapturer'
 import { audioMixer } from './core/AudioMixer'
 import { recordingEngine } from './core/RecordingEngine'
+import { startPreWarming, getPrepRecordingDimensions } from './core/recordingPreWarming'
 import { QUALITY_PRESETS, type CameraSettings } from './shared/types'
 import { useRecordingCountdown } from './hooks/useRecordingCountdown'
+import { usePipSync } from './hooks/usePipSync'
+import type { ConcatParams } from './global'
 
 function App() {
   const isAreaSelectionMode = window.location.hash === '#/area-selection'
   const isCameraPreviewMode = window.location.hash === '#/camera-preview'
+  const isWindowPickerMode = window.location.hash === '#/window-picker'
 
   if (isCameraPreviewMode) {
     return <CameraPreviewOverlay
@@ -24,8 +29,13 @@ function App() {
     return <AreaOverlayForSelectionWindow />
   }
 
-  const { setLastSavedPath, status, setStatus } = useAppStore()
+  if (isWindowPickerMode) {
+    return <WindowPickerForSelectionWindow />
+  }
+
+  const { setLastSavedPath, status, setStatus, isCountdownFinished, prepState } = useAppStore()
   const { startCountdown } = useRecordingCountdown()
+  usePipSync()
 
   const [defaultPath, setDefaultPath] = useState('')
 
@@ -33,322 +43,345 @@ function App() {
   const displayStreamRef = useRef<MediaStream | null>(null)
   const systemAudioStreamRef = useRef<MediaStream | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const videoElementRef = useRef<HTMLVideoElement | null>(null)
-  const cropIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  /**
-   * 创建裁剪后的 MediaStream (仅物理裁剪，放弃任何 PIP 画布混合)
-   */
-  const createCroppedStream = useCallback(async (
-    mainStream: MediaStream, 
-    area: AreaSelection | null
-  ): Promise<MediaStream> => {
-    if (!area) return mainStream
-
-    const mainVideoTrack = mainStream.getVideoTracks()[0]
-    if (!mainVideoTrack) {
-      console.error('[ZapRec] No video track found in main stream')
-      return mainStream
+  const restorePipState = useCallback(() => {
+    const store = useAppStore.getState()
+    if (store.savedPipEnabled) {
+      store.setPipEnabled(true)
     }
-
-    const mainVideo = document.createElement('video')
-    mainVideo.srcObject = new MediaStream([mainVideoTrack])
-    mainVideo.muted = true
-    mainVideo.autoplay = true
-    mainVideo.playsInline = true
-    videoElementRef.current = mainVideo
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Main video load timeout')), 5000)
-      mainVideo.onloadedmetadata = () => {
-        clearTimeout(timeout)
-        resolve()
-      }
-      mainVideo.onerror = () => {
-        clearTimeout(timeout)
-        reject(new Error('Main video error'))
-      }
-    })
-
-    const vw = mainVideo.videoWidth
-    const vh = mainVideo.videoHeight
-
-    let physicalX = 0
-    let physicalY = 0
-    let physicalW = vw
-    let physicalH = vh
-
-    const screenWidth = window.screen.width
-    const currentScale = (vw > 0 && screenWidth > 0) ? (vw / screenWidth) : (window.devicePixelRatio || 1)
-
-    physicalX = Math.round(area.x * currentScale)
-    physicalY = Math.round(area.y * currentScale)
-    physicalW = Math.round(area.width * currentScale)
-    physicalH = Math.round(area.height * currentScale)
-
-    physicalX = Math.max(0, Math.min(physicalX, vw))
-    physicalY = Math.max(0, Math.min(physicalY, vh))
-    physicalW = Math.min(physicalW, vw - physicalX)
-    physicalH = Math.min(physicalH, vh - physicalY)
-
-    physicalW = physicalW % 2 === 0 ? physicalW : physicalW - 1
-    physicalH = physicalH % 2 === 0 ? physicalH : physicalH - 1
-
-    console.log(`[ZapRec] Main video resolution: ${vw}x${vh}`)
-    console.log(`[ZapRec] Output canvas resolution: ${physicalW}x${physicalH}`)
-
-    const canvas = document.createElement('canvas')
-    canvas.width = physicalW
-    canvas.height = physicalH
-    canvasRef.current = canvas
-
-    const ctx = canvas.getContext('2d')!
-    ctx.imageSmoothingEnabled = false
-
-    mainVideo.play().catch(err => console.error('[ZapRec] Main video play error:', err))
-
-    if (mainVideo.readyState >= 2) {
-      ctx.drawImage(mainVideo, physicalX, physicalY, physicalW, physicalH, 0, 0, physicalW, physicalH)
-    }
-
-    cropIntervalRef.current = setInterval(() => {
-      const v = videoElementRef.current
-      if (!v || v.readyState < 2) return
-      
-      ctx.drawImage(
-        v,
-        physicalX, physicalY,
-        physicalW, physicalH,
-        0, 0,
-        physicalW, physicalH
-      )
-    }, 1000 / 30)
-
-    return canvas.captureStream(30)
+    store.setSavedPipEnabled(null)
+    store.setPipButtonDisabled(false)
   }, [])
 
-  const stopCropStream = useCallback(() => {
-    if (cropIntervalRef.current) {
-      clearInterval(cropIntervalRef.current)
-      cropIntervalRef.current = null
-    }
-    if (videoElementRef.current) {
-      videoElementRef.current.srcObject = null
-      videoElementRef.current = null
-    }
-    canvasRef.current = null
-  }, [])
-
-  const startRecording = useCallback(async () => {
+  const commitRecording = useCallback(async () => {
     try {
-      // 直接从 store 取最新状态，避免 useCallback 闭包读取到旧值
       const state = useAppStore.getState()
-      const currentSource = state.selectedSource
-      const currentSourceId = state.selectedSourceId
-      const currentSettings = state.settings
-      const micEnabled = state.microphoneEnabled
-      const sysAudioEnabled = state.systemAudioEnabled
-
-      const quality = QUALITY_PRESETS[currentSettings.quality]
-      const outputDir = currentSettings.outputDirectory || defaultPath || ''
+      const { settings, selectedSource, pendingAreaSelection } = state
+      const outputDir = settings.outputDirectory || defaultPath || ''
       const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
       const filepath = `${outputDir}/ZapRec_${timestamp}.mp4`
 
-      await window.caplet.streamStart(filepath)
-
-      let displayStream: MediaStream | null = null
-      let recordingWidth = quality.width
-      let recordingHeight = quality.height
-
-      if (currentSource === 'display') {
-        const sourceId = currentSourceId || 'screen:0:0'
-        displayStream = await mediaCapturer.startDisplayCapture(sourceId)
-        displayStreamRef.current = displayStream
-
-      } else if (currentSource === 'window') {
-        const windowInfo = state.selectedWindow
-        if (!windowInfo) {
-          console.error('[ZapRec] Window mode but no window selected')
-          await window.caplet.streamEnd()
-          setStatus('idle')
-          return
-        }
-        displayStream = await mediaCapturer.startWindowCapture(windowInfo.id)
-        displayStreamRef.current = displayStream
+      if (selectedSource === 'area' && pendingAreaSelection) {
+        const { width: actualWidth, height: actualHeight } = getPrepRecordingDimensions()
         
-        const videoTrack = displayStream.getVideoTracks()[0]
-        if (videoTrack) {
-          const getRealDimensions = (stream: MediaStream): Promise<{ width: number, height: number }> => {
-            return new Promise((resolve) => {
-              const video = document.createElement('video')
-              video.srcObject = stream
-              video.muted = true
-              
-              video.onloadedmetadata = () => {
-                resolve({ width: video.videoWidth, height: video.videoHeight })
-                video.srcObject = null
-              }
-              video.play().catch(() => {})
-            })
-          }
-
-          const realSize = await getRealDimensions(displayStream)
-          recordingWidth = realSize.width
-          recordingHeight = realSize.height
-          if (recordingWidth % 2 !== 0) recordingWidth--
-          if (recordingHeight % 2 !== 0) recordingHeight--
-
-          videoTrack.onended = () => {
-            console.warn('[ZapRec] 目标窗口已关闭，自动停止并保存录制')
-            stopRecording()
-          }
-        }
-
-      } else if (currentSource === 'camera') {
-        const pendingSettings = state.pendingCameraSettings
-        if (!pendingSettings) {
-          console.error('[ZapRec] Camera mode but no pending settings')
-          await window.caplet.streamEnd()
-          setStatus('idle')
-          return
-        }
-        
-        displayStream = await mediaCapturer.startCameraCapture(micEnabled, pendingSettings.deviceId)
-        displayStreamRef.current = displayStream
-        
-        const videoTrack = displayStream.getVideoTracks()[0]
-        if (videoTrack) {
-          const settings = videoTrack.getSettings()
-          
-          recordingWidth = settings.width || quality.width
-          recordingHeight = settings.height || quality.height
-          
-          if (recordingWidth % 2 !== 0) recordingWidth--
-          if (recordingHeight % 2 !== 0) recordingHeight--
-
-          console.log(`[ZapRec] 摄像头录制就绪，真实分辨率: ${recordingWidth}x${recordingHeight}`)
-          
-          useAppStore.getState().setPendingCameraSettings(null)
-        } else {
-          console.error('[ZapRec] 无法获取摄像头视频轨道')
-          setStatus('idle')
-          return
-        }
-
-      } else if (currentSource === 'area') {
-        const pendingArea = state.pendingAreaSelection
-        if (!pendingArea) {
-          console.error('[ZapRec] Area mode but no pending area selection')
-          await window.caplet.streamEnd()
-          setStatus('idle')
-          return
-        }
-
-        // 先捕获全屏流
-        const rawStream = await mediaCapturer.startDisplayCapture('screen:0:0')
-        displayStreamRef.current = rawStream
-
-        // 仅进行纯物理画布裁剪
-        displayStream = await createCroppedStream(rawStream, pendingArea)
-        // 从 canvasRef 读出实际的物理尺寸
-        if (canvasRef.current) {
-          recordingWidth = canvasRef.current.width
-          recordingHeight = canvasRef.current.height
-        }
-
-        // 清除已消费的选区
-        useAppStore.getState().setPendingAreaSelection(null)
+        useAppStore.getState().setActiveCropArea({
+          x: pendingAreaSelection.x,
+          y: pendingAreaSelection.y,
+          width: pendingAreaSelection.width,
+          height: pendingAreaSelection.height,
+          scaleX: actualWidth / window.screen.width,
+          scaleY: actualHeight / window.screen.height
+        })
       }
 
-      if (!displayStream) {
-        console.error('[ZapRec] No display stream available')
-        await window.caplet.streamEnd()
+      const part1Path = recordingEngine.initializePaths(filepath)
+      await window.caplet.streamStart(part1Path)
+      setLastSavedPath(filepath)
+
+      await recordingEngine.start()
+
+      if (selectedSource === 'camera') {
+        window.caplet.showCameraWindow()
+        if (settings.autoHide) {
+          await window.caplet.windowMinimize()
+        }
+      } else {
+        if (settings.autoHide) {
+          window.caplet.windowMinimize()
+        }
+      }
+
+      setStatus('recording')
+    } catch (error) {
+      console.error('[ZapRec] Failed to commit recording:', error)
+      useAppStore.getState().setStatus('idle')
+    }
+  }, [defaultPath, setLastSavedPath, setStatus])
+
+const startRecording = useCallback(async () => {
+    const state = useAppStore.getState()
+    const currentSource = state.selectedSource
+    const currentSourceId = state.selectedSourceId
+    const currentSettings = state.settings
+    const microphoneEnabled = state.microphoneEnabled
+    const systemAudioEnabled = state.systemAudioEnabled
+
+    const quality = QUALITY_PRESETS[currentSettings.quality]
+    const outputDir = currentSettings.outputDirectory || defaultPath || ''
+    const timestamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15)
+    const filepath = `${outputDir}/ZapRec_${timestamp}.mp4`
+
+    const part1Path = recordingEngine.initializePaths(filepath)
+    await window.caplet.streamStart(part1Path)
+
+    let displayStream: MediaStream | null = null
+    let recordingWidth = quality.width
+    let recordingHeight = quality.height
+
+    if (currentSource === 'display') {
+      const sourceId = currentSourceId || 'screen:0:0'
+      displayStream = await mediaCapturer.startDisplayCapture(sourceId)
+      displayStreamRef.current = displayStream
+
+    } else if (currentSource === 'window') {
+      const windowInfo = state.selectedWindow
+      if (!windowInfo) {
+        console.error('[ZapRec] Window mode but no window selected')
+        recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+          await window.caplet.streamEnd()
+        }).catch(console.error)
+        setStatus('idle')
+        return
+      }
+      displayStream = await mediaCapturer.startWindowCapture(windowInfo.id)
+      displayStreamRef.current = displayStream
+
+      const videoTrack = displayStream.getVideoTracks()[0]
+      if (videoTrack) {
+        const getRealDimensions = (stream: MediaStream): Promise<{ width: number, height: number }> => {
+          return new Promise((resolve) => {
+            const video = document.createElement('video')
+            video.srcObject = stream
+            video.muted = true
+
+            video.onloadedmetadata = () => {
+              resolve({ width: video.videoWidth, height: video.videoHeight })
+              video.srcObject = null
+            }
+            video.play().catch(() => {})
+          })
+        }
+
+        const realSize = await getRealDimensions(displayStream)
+        recordingWidth = realSize.width
+        recordingHeight = realSize.height
+        if (recordingWidth % 2 !== 0) recordingWidth--
+        if (recordingHeight % 2 !== 0) recordingHeight--
+
+        videoTrack.onended = () => {
+          console.warn('[ZapRec] 目标窗口已关闭，自动停止并保存录制')
+          stopRecording()
+        }
+      }
+
+    } else if (currentSource === 'camera') {
+      const pendingSettings = state.pendingCameraSettings
+      if (!pendingSettings) {
+        console.error('[ZapRec] Camera mode but no pending settings')
+        recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+          await window.caplet.streamEnd()
+        }).catch(console.error)
+        restorePipState()
         setStatus('idle')
         return
       }
 
-      await recordingEngine.initialize(
-        { width: recordingWidth, height: recordingHeight, fps: quality.fps },
-        () => {}
-      )
+      displayStream = await mediaCapturer.startCameraCapture(microphoneEnabled, pendingSettings.deviceId)
+      displayStreamRef.current = displayStream
 
-      recordingEngine.addVideoTrack(displayStream, recordingWidth, recordingHeight)
+      const videoTrack = displayStream.getVideoTracks()[0]
+      if (videoTrack) {
+        const settings = videoTrack.getSettings()
 
-      if (sysAudioEnabled || micEnabled) {
-        await audioMixer.initialize()
+        recordingWidth = settings.width || quality.width
+        recordingHeight = settings.height || quality.height
 
-        // 系统音：从原始全屏流（displayStreamRef）里取音轨，而非裁剪后的流
-        if (sysAudioEnabled && displayStreamRef.current) {
-          const audioTracks = displayStreamRef.current.getAudioTracks()
-          if (audioTracks.length > 0) {
-            const systemStream = new MediaStream([audioTracks[0]])
-            systemAudioStreamRef.current = systemStream
-            audioMixer.addStream(systemStream, 'system')
-          }
-        }
+        if (recordingWidth % 2 !== 0) recordingWidth--
+        if (recordingHeight % 2 !== 0) recordingHeight--
 
-        if (micEnabled) {
-          const micStream = await mediaCapturer.startMicrophoneCapture()
-          micStreamRef.current = micStream
-          audioMixer.addStream(micStream, 'microphone')
-        }
+        console.log(`[ZapRec] 摄像头录制就绪，真实分辨率: ${recordingWidth}x${recordingHeight}`)
 
-        await audioMixer.resume()
-
-        const mixedStream = audioMixer.getOutputStream()
-        if (mixedStream && mixedStream.getAudioTracks().length > 0) {
-          recordingEngine.addAudioTrack(mixedStream)
-        }
+        useAppStore.getState().setPendingCameraSettings(null)
+      } else {
+        console.error('[ZapRec] 无法获取摄像头视频轨道')
+        recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+          await window.caplet.streamEnd()
+        }).catch(console.error)
+        restorePipState()
+        setStatus('idle')
+        return
       }
 
-      await recordingEngine.start()
+    } else if (currentSource === 'area') {
+      const pendingArea = state.pendingAreaSelection
+      if (!pendingArea) {
+        console.error('[ZapRec] Area mode but no pending area selection')
+        recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+          await window.caplet.streamEnd()
+        }).catch(console.error)
+        setStatus('idle')
+        return
+      }
 
-      setLastSavedPath(filepath)
-      setStatus('recording')
+      const rawStream = await mediaCapturer.startDisplayCapture('screen:0:0')
+      displayStreamRef.current = rawStream
+      displayStream = rawStream
 
+      const videoSettings = rawStream.getVideoTracks()[0].getSettings()
+      recordingWidth = videoSettings.width || window.screen.width
+      recordingHeight = videoSettings.height || window.screen.height
+
+      if (recordingWidth % 2 !== 0) recordingWidth--
+      if (recordingHeight % 2 !== 0) recordingHeight--
+
+      useAppStore.getState().setActiveCropArea({
+        ...pendingArea,
+        scaleX: recordingWidth / window.screen.width,
+        scaleY: recordingHeight / window.screen.height
+      })
+
+      useAppStore.getState().setPendingAreaSelection(null)
+    }
+
+    if (!displayStream) {
+      console.error('[ZapRec] No display stream available')
+      recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+        await window.caplet.streamEnd()
+      }).catch(console.error)
+      setStatus('idle')
+      return
+    }
+
+    await recordingEngine.initialize(
+      { width: recordingWidth, height: recordingHeight, fps: quality.fps },
+      () => {}
+    )
+
+    recordingEngine.addVideoTrack(displayStream, recordingWidth, recordingHeight)
+
+    await audioMixer.initialize()
+
+    if (displayStreamRef.current) {
+      const audioTracks = displayStreamRef.current.getAudioTracks()
+      if (audioTracks.length > 0) {
+        const systemStream = new MediaStream([audioTracks[0]])
+        systemAudioStreamRef.current = systemStream
+        const isSystemAdded = audioMixer.addStream(systemStream, 'system')
+        if (isSystemAdded) {
+          audioMixer.setGain('system', systemAudioEnabled ? 1 : 0)
+        } else {
+          console.warn('[ZapRec] System audio stream was empty or failed to add to mixer.')
+        }
+      } else if (systemAudioEnabled) {
+        console.warn('[ZapRec] Expected system audio but no audio tracks found in display stream.')
+      }
+    }
+
+    const micStream = await mediaCapturer.startMicrophoneCapture()
+    micStreamRef.current = micStream
+    const isMicAdded = audioMixer.addStream(micStream, 'microphone')
+    if (isMicAdded) {
+      audioMixer.setGain('microphone', microphoneEnabled ? 1 : 0)
+    } else {
+      console.warn('[ZapRec] Microphone stream was empty or failed to add to mixer.')
+    }
+
+    await audioMixer.resume()
+
+    const mixedStream = audioMixer.getOutputStream()
+    if (mixedStream && mixedStream.getAudioTracks().length > 0) {
+      recordingEngine.addAudioTrack(mixedStream)
+    }
+
+    await recordingEngine.start()
+
+    setLastSavedPath(filepath)
+
+    if (currentSource === 'camera') {
+      window.caplet.showCameraWindow()
       if (currentSettings.autoHide) {
-        window.caplet.windowMinimize()
+        await window.caplet.windowMinimize()
       }
-
-    } catch (error) {
-      console.error('[ZapRec] Failed to start recording:', error)
-      await window.caplet.streamEnd()
-      setStatus('idle')
     }
-  }, [defaultPath, setStatus, setLastSavedPath, createCroppedStream])
 
-  const stopRecording = useCallback(async () => {
+    setStatus('recording')
+
+    if (currentSettings.autoHide) {
+      window.caplet.windowMinimize()
+    }
+
+  }, [defaultPath, setStatus, setLastSavedPath, restorePipState])
+
+const stopRecording = useCallback(() => {
+  const store = useAppStore.getState()
+  const wasCameraMode = store.selectedSource === 'camera'
+  const wasAreaMode = store.selectedSource === 'area'
+  const savedPip = store.savedPipEnabled
+  const cropArea = store.activeCropArea
+  const currentSegments = [...store.recordingSegments]
+
+  if (timerRef.current) {
+    clearInterval(timerRef.current)
+    timerRef.current = null
+  }
+  store.reset()
+  setStatus('idle')
+
+  recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
     try {
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
+      const lastSegmentPath = await recordingEngine.stopAndSave()
+      await window.caplet.streamEnd()
+      window.caplet.sendRecordingStopped()
+
+      const allSegments = [...currentSegments, lastSegmentPath].filter(Boolean) as string[]
+      const finalPath = recordingEngine.getBaseFilePath()
+
+      if (wasCameraMode) {
+        window.caplet.closeCameraPreviewWindow()
       }
 
-      await recordingEngine.stop()
-      await window.caplet.streamEnd()
-
-      stopCropStream()
-      audioMixer.destroy()
       mediaCapturer.stopAll()
-
+      if (systemAudioStreamRef.current) {
+        systemAudioStreamRef.current.getTracks().forEach(track => track.stop())
+        systemAudioStreamRef.current = null
+      }
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop())
+        micStreamRef.current = null
+      }
+      audioMixer.destroy()
       displayStreamRef.current = null
-      systemAudioStreamRef.current = null
-      micStreamRef.current = null
 
-      useAppStore.getState().reset()
-      setStatus('idle')
+      if (wasCameraMode && savedPip) {
+        restorePipState()
+      }
 
-      window.caplet.sendRecordingStopped()
+      let cropParamsStr: string | undefined = undefined
+      if (wasAreaMode && cropArea) {
+        const finalW = Math.floor((cropArea.width * cropArea.scaleX) / 2) * 2
+        const finalH = Math.floor((cropArea.height * cropArea.scaleY) / 2) * 2
+        const finalX = Math.floor((cropArea.x * cropArea.scaleX) / 2) * 2
+        const finalY = Math.floor((cropArea.y * cropArea.scaleY) / 2) * 2
+        cropParamsStr = `${finalW}:${finalH}:${finalX}:${finalY}`
+      }
+
+      if (allSegments.length > 1 && finalPath) {
+        const concatParams: ConcatParams = {
+          segments: allSegments,
+          finalPath,
+          cropParams: cropParamsStr
+        }
+        window.caplet.processSegmentsConcat(concatParams)
+      } else if (allSegments.length === 1 && finalPath) {
+        window.caplet.renameFile(allSegments[0], finalPath)
+        if (cropParamsStr) {
+          window.caplet.processAreaCrop({
+            filePath: finalPath,
+            cropParams: cropParamsStr
+          })
+        }
+      } else if (cropParamsStr && lastSegmentPath) {
+        window.caplet.processAreaCrop({
+          filePath: lastSegmentPath,
+          cropParams: cropParamsStr
+        })
+      }
 
     } catch (error) {
-      console.error('[ZapRec] Failed to stop recording:', error)
-      await window.caplet.streamEnd()
-      useAppStore.getState().reset()
-      setStatus('idle')
-      window.caplet.sendRecordingStopped()
+      console.error('[ZapRec] Failed to stop recording silently:', error)
     }
-  }, [setStatus, stopCropStream])
+  }).catch(console.error)
+}, [setStatus, restorePipState])
 
   useEffect(() => {
     const loadDefaultPath = async () => {
@@ -364,28 +397,83 @@ function App() {
 
     const unlistenRecord = window.caplet.onShortcutToggleRecord(() => {
       const s = useAppStore.getState().status
-      if (s === 'recording') stopRecording()
+      if (s === 'recording' || s === 'paused') stopRecording()
       else if (s === 'idle') startRecording()
     })
 
     const unlistenPause = window.caplet.onShortcutTogglePause(() => {
-      console.log('[ZapRec] Toggle pause shortcut triggered')
+      const store = useAppStore.getState()
+      if (store.status !== 'recording' && store.status !== 'paused') return
+
+      const newPaused = !store.isPaused
+      store.setIsPaused(newPaused)
+      setStatus(newPaused ? 'paused' : 'recording')
+
+      recordingEngine.taskQueue = recordingEngine.taskQueue.then(async () => {
+        if (newPaused) {
+          const segmentPath = await recordingEngine.pause()
+          await window.caplet.streamEnd()
+          if (segmentPath) {
+            store.addRecordingSegment(segmentPath)
+          }
+        } else {
+          const nextSegmentPath = recordingEngine.generateNextSegmentPath()
+          if (nextSegmentPath) {
+            recordingEngine.setFilePath(nextSegmentPath)
+            await window.caplet.streamStart(nextSegmentPath)
+          }
+          await recordingEngine.resume()
+        }
+      }).catch(console.error)
+    })
+
+    const unlistenRecordingStopRequested = window.caplet.onRecordingStopRequested(() => {
+      const s = useAppStore.getState().status
+      if (s === 'recording' || s === 'paused') {
+        stopRecording()
+      }
+    })
+
+    const unlistenCropFinished = window.caplet.onCropFinished((filePath) => {
+      console.log('[ZapRec] Crop finished:', filePath)
+      setStatus('idle')
+    })
+
+    const unlistenCropFailed = window.caplet.onCropFailed((error) => {
+      console.error('[ZapRec] Crop failed:', error)
+      setStatus('idle')
+    })
+
+    const unlistenConcatFinished = window.caplet.onConcatFinished((filePath) => {
+      console.log('[ZapRec] Concat finished:', filePath)
+      useAppStore.getState().clearRecordingSegments()
+      setStatus('idle')
+    })
+
+    const unlistenConcatFailed = window.caplet.onConcatFailed((error) => {
+      console.error('[ZapRec] Concat failed:', error)
+      useAppStore.getState().clearRecordingSegments()
+      setStatus('idle')
     })
 
     return () => {
       unlistenRecord()
       unlistenPause()
+      unlistenRecordingStopRequested()
+      unlistenCropFinished()
+      unlistenCropFailed()
+      unlistenConcatFinished()
+      unlistenConcatFailed()
     }
-  }, [setLastSavedPath, startRecording, stopRecording])
+  }, [setLastSavedPath, startRecording, stopRecording, setStatus])
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
-      stopCropStream()
       mediaCapturer.stopAll()
       audioMixer.destroy()
     }
-  }, [stopCropStream])
+  }, [])
 
   useEffect(() => {
     const unlisten = window.caplet.onAreaSelectionCancelled(() => {
@@ -395,22 +483,37 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const unlisten = window.caplet.onCameraPreviewCancelled(() => {
+      restorePipState()
+    })
+    return () => unlisten()
+  }, [restorePipState])
+
+  useEffect(() => {
     const unlisten = window.caplet.onCameraSettingsConfirmed((settings) => {
       useAppStore.getState().setPendingCameraSettings(settings)
       useAppStore.getState().setSelectedSource('camera')
-      startCountdown(() => startRecording())
+      startPreWarming()
+      startCountdown()
     })
     return () => unlisten()
-  }, [startCountdown, startRecording])
+  }, [startCountdown])
 
   useEffect(() => {
     const unlistenWindowSelected = window.caplet.onWindowSelected((windowData) => {
       useAppStore.getState().setSelectedWindow(windowData)
-      startCountdown(() => startRecording())
+      startPreWarming()
+      startCountdown()
     })
 
     const unlistenWindowCancelled = window.caplet.onWindowSelectionCancelled(() => {
-      useAppStore.getState().setSelectedSource('display')
+      const store = useAppStore.getState()
+      if (store.savedPipEnabled) {
+        store.setPipEnabled(true)
+      }
+      store.setSavedPipEnabled(null)
+      store.setPipButtonDisabled(false)
+      store.setSelectedSource('display')
     })
 
     return () => {
@@ -418,6 +521,19 @@ function App() {
       unlistenWindowCancelled()
     }
   }, [startCountdown, startRecording])
+
+  useEffect(() => {
+    const store = useAppStore.getState()
+    if (store.status !== 'countdown' || !store.isCountdownFinished) {
+      return
+    }
+
+    if (store.prepState === 'ready') {
+      commitRecording()
+    } else if (store.prepState === 'failed') {
+      store.setStatus('idle')
+    }
+  }, [isCountdownFinished, prepState, commitRecording])
 
   const handleOpenWindowPicker = useCallback(() => {
     useAppStore.getState().setSelectedSource('window')
@@ -446,4 +562,14 @@ function AreaOverlayForSelectionWindow() {
     window.caplet.cancelAreaSelection()
   }
   return <AreaOverlay onConfirm={handleConfirm} onCancel={handleCancel} />
+}
+
+function WindowPickerForSelectionWindow() {
+  const handleSelect = (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => {
+    window.caplet.sendWindowSelected(windowData)
+  }
+  const handleCancel = () => {
+    window.caplet.cancelWindowPicker()
+  }
+  return <WindowPicker onSelect={handleSelect} onCancel={handleCancel} />
 }
