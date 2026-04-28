@@ -57,7 +57,7 @@ export default function WindowPicker({ onSelect, onCancel }: WindowPickerProps) 
     >
       {/* 顶部提示 */}
       <div className="fixed top-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full text-sm text-white flex gap-6"
-        style={{ backgroundColor: 'rgba(30, 30, 30, 0.92)', border: '2px solid rgba(255, 255, 255, 0.45)', backdropFilter: 'blur(10px)', zIndex: 10001 }}>
+        style={{ backgroundColor: 'rgba(17, 24, 40, 0.95)', border: '2px solid rgba(255, 255, 255, 0.35)', backdropFilter: 'blur(10px)', zIndex: 10001 }}>
         <span className="flex items-center gap-2"><LayoutGrid size={16} /> 选择要录制的窗口</span>
         <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Esc</kbd> 取消</span>
       </div>
@@ -66,8 +66,8 @@ export default function WindowPicker({ onSelect, onCancel }: WindowPickerProps) 
       <div
         className="w-[800px] h-[50vh] min-h-[400px] rounded-2xl overflow-hidden flex flex-col shadow-2xl"
         style={{
-          backgroundColor: 'rgba(28, 28, 30, 0.95)',
-          border: '1px solid rgba(255, 255, 255, 0.08)',
+          backgroundColor: 'rgba(17, 24, 40, 0.95)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
         }}
       >
         <div className="p-4 overflow-y-auto flex-1 bg-black/20">

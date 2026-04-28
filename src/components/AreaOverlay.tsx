@@ -98,9 +98,8 @@ export default function AreaOverlay({ onConfirm, onCancel }: AreaOverlayProps) {
       {!isRecordingVisuals && (
         <div className="fixed top-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full text-sm text-white flex gap-6"
             style={{
-              // 👇 更强的深色半透底，永远可见
-              backgroundColor: 'rgba(30, 30, 30, 0.92)',
-              border: '2px solid rgba(255, 255, 255, 0.45)', // 加一圈极细白边
+              backgroundColor: 'rgba(17, 24, 40, 0.95)',
+              border: '2px solid rgba(255, 255, 255, 0.35)',
               backdropFilter: 'blur(10px)',
               zIndex: 10001,
             }}>

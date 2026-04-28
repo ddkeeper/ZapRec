@@ -95,7 +95,7 @@ export default function CameraPreviewOverlay({ onConfirm, onCancel, initialMode 
     return (
       <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 select-none">
         <div className="fixed top-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full text-sm text-white flex gap-6"
-          style={{ backgroundColor: 'rgba(30, 30, 30, 0.92)', border: '2px solid rgba(255, 255, 255, 0.45)', backdropFilter: 'blur(10px)', zIndex: 10001 }}>
+          style={{ backgroundColor: 'rgba(17, 24, 40, 0.95)', border: '2px solid rgba(255, 255, 255, 0.35)', backdropFilter: 'blur(10px)', zIndex: 10001 }}>
           <span className="flex items-center gap-2"><Webcam size={16} /> 纯摄像头录制</span>
           <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Enter</kbd> 确认</span>
           <span><kbd className="bg-white/20 px-1.5 py-0.5 rounded">Esc</kbd> 取消</span>

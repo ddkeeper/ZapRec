@@ -1,252 +1,426 @@
-# Toolbar UI 问题与代码文档
+# Toolbar UI 代码文档
 
-## 问题 1：三条竖线粗细不统一
+## 目录
+1. [App.tsx 使用](#apptsx-使用)
+2. [主进程窗口创建](#主进程窗口创建)
+3. [Toolbar 组件](#toolbar-组件)
 
-### 问题代码位置
+---
 
-| 分割线 | 文件 | 行号 |
-|--------|------|------|
-| 分割线1 | Toolbar.tsx | 162 |
-| 分割线2 | Toolbar.tsx | 273 |
-| 分割线3 | Toolbar.tsx | 335 |
+## App.tsx 使用
 
-### 相关代码
+### 文件位置
+`src/App.tsx`
 
-**Toolbar.tsx 第 162 行**
+### Toolbar 使用代码
+
 ```tsx
-<div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
+function App() {
+  // ... 状态和逻辑
+  
+  const handleOpenWindowPicker = useCallback(() => {
+    useAppStore.getState().setSelectedSource('window')
+    window.caplet.startWindowPicker()
+  }, [])
+
+  return (
+    <div className="h-screen w-screen overflow-hidden">
+      <Toolbar
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
+        isRecording={status === 'recording'}
+        onOpenWindowPicker={handleOpenWindowPicker}
+      />
+    </div>
+  )
+}
 ```
 
-**Toolbar.tsx 第 273 行**
-```tsx
-<div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
-```
+### Props 接口
 
-**Toolbar.tsx 第 335 行**
-```tsx
-<div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
+```typescript
+interface ToolbarProps {
+  onStartRecording: () => void
+  onStopRecording: () => void
+  isRecording: boolean
+  onOpenWindowPicker?: () => void
+}
 ```
 
 ---
 
-## 问题 2：工具条右侧点击遮挡
+## 主进程窗口创建
 
-### 问题代码位置
+### 文件位置
+`src/main/index.ts`
 
-Toolbar.tsx 第 135-145 行（Toolbar 最外层容器）
+### createWindow 函数
 
-### 相关代码
+```typescript
+function createWindow() {
+  const iconPath = getIconPath(256)
+  
+  mainWindow = new BrowserWindow({
+    width: 800,
+    height: 64,
+    frame: false,
+    transparent: false,
+    resizable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    backgroundColor: '#00000000',
+    icon: iconPath,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
 
-**Toolbar.tsx 完整 return 语句（第 135-347 行）**
+  if (VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(VITE_DEV_SERVER_URL)
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'))
+  }
+
+  mainWindow.on('close', () => {
+    destroySelectionWindow()
+    destroyWindowPickerWindow()
+    destroyPipWindow()
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+```
+
+### 窗口尺寸 IPC
+
+```typescript
+ipcMain.on('resize-toolbar', (_, { width, height }) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setSize(width, height)
+  }
+})
+```
+
+### 窗口控制 IPC
+
+```typescript
+ipcMain.handle('window-minimize', () => {
+  mainWindow?.minimize()
+})
+
+ipcMain.handle('window-close', () => {
+  mainWindow?.close()
+})
+```
+
+---
+
+## Toolbar 组件
+
+### 文件位置
+`src/components/Toolbar.tsx`
+
+### 组件结构
+
 ```tsx
-return (
-  <div 
-    className="inline-flex items-center h-14 px-3 rounded-2xl overflow-hidden select-none transition-all duration-300"
-    style={{
-      backgroundColor: 'rgba(0, 0, 0, 0.6)',
-      backdropFilter: 'blur(48px)',
-      WebkitBackdropFilter: 'blur(48px)',
-      border: '1px solid rgba(255, 255, 255, 0.1)',
-      WebkitAppRegion: 'drag',
-    } as React.CSSProperties}
-  >
-    {/* 左侧：设置按钮 - 始终显示 */}
-    <button
-      onClick={() => {}}
-      disabled={isRecording}
-      className={`flex items-center justify-center w-8 h-8 rounded-lg transition-colors shrink-0 ${
-        isRecording 
-          ? 'text-white/30 cursor-not-allowed' 
-          : 'hover:bg-white/10 text-white/90'
-      }`}
-      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      title="设置"
-    >
-      <Settings size={18} strokeWidth={2} color={isRecording ? 'rgba(255,255,255,0.3)' : 'white'} />
-    </button>
+export default function Toolbar({ onStartRecording, onStopRecording, isRecording, onOpenWindowPicker }: ToolbarProps) {
+  const { status, countdownValue, microphoneEnabled, systemAudioEnabled, ... } = useAppStore()
+  const { startCountdown } = useRecordingCountdown()
+  const [recordingTime, setRecordingTime] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
 
-    {/* 分割线1 */}
-    <div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
-
-    {/* 中间：录制源 或 计时器+控制 */}
-    <div className="flex items-center justify-center gap-1 min-w-[220px]" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-      {status === 'recording' || status === 'paused' ? (
-        <>
-          {/* 计时器 */}
-          <div className="flex items-center gap-2 mr-2">
-            <div 
-              className="w-2.5 h-2.5 rounded-full"
-              style={{ 
-                backgroundColor: status === 'paused' ? '#fbbf24' : '#ef4444',
-                boxShadow: status === 'paused' 
-                  ? '0 0 8px rgba(251,191,36,0.8)' 
-                  : '0 0 8px rgba(239,68,68,0.8)'
-              }}
-            />
-            <span className="font-mono text-white text-sm font-medium tracking-wide">
-              {formatTime(recordingTime)}
-            </span>
-          </div>
-          {/* 暂停/恢复 */}
-          <button
-            onClick={() => setIsPaused(!isPaused)}
-            className="p-2 rounded-md hover:bg-white/10 text-white/90 transition-colors"
-            title={isPaused ? "恢复" : "暂停"}
-          >
-            {isPaused ? <Play size={16} strokeWidth={2} /> : <Pause size={16} strokeWidth={2} />}
-          </button>
-          {/* 停止 */}
-          <button
-            onClick={handleRecordToggle}
-            className="p-2 rounded-md hover:bg-red-500/20 text-red-400 hover:text-red-500 transition-colors"
-            title="停止录制"
-          >
-            <Square size={16} strokeWidth={2} fill="currentColor" />
-          </button>
-        </>
-      ) : status === 'countdown' ? (
-        <div className="flex items-center gap-4 mr-1">
-          <div className="flex items-center gap-2">
-            <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse" />
-            <span className="font-mono text-yellow-400 text-sm font-medium tracking-wide">
-              即将开始: {countdownValue}s
-            </span>
-          </div>
-          
-          <div className="flex items-center gap-2 border-l border-white/10 pl-3">
-            <button
-              onClick={() => {
-                const store = useAppStore.getState()
-                store.setStatus('idle')
-                store.setCountdownValue(0)
-                if (store.selectedSource === 'area') {
-                  window.caplet.cancelAreaSelection()
-                  store.setPendingAreaSelection(null)
-                } else if (store.selectedSource === 'window') {
-                  window.caplet.cancelWindowPicker()
-                  store.setSelectedWindow(null)
-                  if (store.savedPipEnabled) {
-                    store.setPipEnabled(true)
-                  }
-                  store.setSavedPipEnabled(null)
-                  store.setPipButtonDisabled(false)
-                } else if (store.selectedSource === 'camera') {
-                  store.setPendingCameraSettings(null)
-                  if (store.savedPipEnabled) {
-                    store.setPipEnabled(true)
-                  }
-                  store.setSavedPipEnabled(null)
-                  store.setPipButtonDisabled(false)
-                }
-              }}
-              className="p-1 text-gray-400 hover:text-white hover:bg-white/10 rounded-md transition-all"
-              title="返回上一步 (Esc)"
-            >
-              <Undo2 size={16} />
-            </button>
-          </div>
-        </div>
-      ) : (
-        /* 录制源按钮 */
-        (['display', 'window', 'area', 'camera'] as const).map((source) => {
-          const IconComponent = sourceIcons[source]
-          const titles: Record<RecordingSource, string> = {
-            display: '录制整个屏幕',
-            window: '录制指定窗口',
-            area: '录制屏幕区域',
-            camera: '仅录制摄像头'
-          }
-          return (
-            <button
-              key={source}
-              onClick={() => handleSourceClick(source)}
-              className="flex flex-col items-center justify-center px-3 py-1.5 rounded-xl transition-all hover:bg-white/10"
-              title={titles[source]}
-            >
-              <IconComponent size={18} strokeWidth={2} color="rgba(255,255,255,0.9)" />
-              <span className="text-xs mt-0.5 text-white/90 font-medium">
-                {sourceLabels[source]}
-              </span>
-            </button>
-          )
-        })
-      )}
-    </div>
-
-    {/* 分割线2 */}
-    <div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
-
-    {/* 右侧：音频开关 - 始终显示 */}
-    <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-      <button
-        onClick={() => {
-          const newValue = !microphoneEnabled
-          setMicrophoneEnabled(newValue)
-          if (status === 'recording' || status === 'countdown') {
-            audioMixer.setGain('microphone', newValue ? 1 : 0)
-          }
-        }}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 hover:bg-white/10"
-        title={microphoneEnabled ? "麦克风：关闭" : "麦克风：开启"}
-      >
-        {microphoneEnabled
-          ? <Mic size={18} strokeWidth={2} color="white" />
-          : <MicOff size={18} strokeWidth={2} color="rgba(255,255,255,0.4)" />
+  // 响应式尺寸监听
+  useEffect(() => {
+    if (!containerRef.current) return
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const rect = entry.target.getBoundingClientRect()
+        const width = Math.round(rect.width)
+        const height = Math.round(rect.height)
+        if (window.caplet?.resizeToolbar) {
+          window.caplet.resizeToolbar(width, height)
         }
-        <span className={`text-sm whitespace-nowrap font-medium ${microphoneEnabled ? 'text-white' : 'text-white/40'}`}>
-          麦克风
-        </span>
-      </button>
+      }
+    })
+    observer.observe(containerRef.current)
+    return () => observer.disconnect()
+  }, [])
 
-      <button
-        onClick={() => {
-          const newValue = !systemAudioEnabled
-          setSystemAudioEnabled(newValue)
-          if (status === 'recording' || status === 'countdown') {
-            audioMixer.setGain('system', newValue ? 1 : 0)
-          }
-        }}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 hover:bg-white/10"
-        title={systemAudioEnabled ? "系统声音：关闭" : "系统声音：开启"}
-      >
-        {systemAudioEnabled
-          ? <Volume2 size={18} strokeWidth={2} color="white" />
-          : <VolumeX size={18} strokeWidth={2} color="rgba(255,255,255,0.4)" />
-        }
-        <span className={`text-sm whitespace-nowrap font-medium ${systemAudioEnabled ? 'text-white' : 'text-white/40'}`}>
-          系统音
-        </span>
-      </button>
+  // 计时器
+  useEffect(() => {
+    if (isRecording && !isPaused) {
+      const timer = setInterval(() => {
+        setRecordingTime(prev => prev + 1)
+      }, 1000)
+      return () => clearInterval(timer)
+    } else if (!isRecording && !isPaused) {
+      setRecordingTime(0)
+    }
+  }, [isRecording, isPaused])
 
-      <button
-        onClick={() => !pipButtonDisabled && setPipEnabled(!pipEnabled)}
-        disabled={pipButtonDisabled}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all shrink-0 ${
-          pipButtonDisabled
-            ? 'opacity-30 cursor-not-allowed'
-            : 'hover:bg-white/10'
-        }`}
-        title={pipButtonDisabled ? "录制中不可用" : pipEnabled ? "画中画：关闭" : "画中画：开启"}
-      >
-        <SquareUser size={18} strokeWidth={2} color={pipEnabled && !pipButtonDisabled ? 'white' : 'rgba(255,255,255,0.4)'} />
-        <span className={`text-sm whitespace-nowrap font-medium ${pipEnabled && !pipButtonDisabled ? 'text-white' : 'text-white/40'}`}>
-          画中画
-        </span>
-      </button>
-    </div>
+  // 时间格式化
+  const formatTime = (seconds: number): string => {
+    const hrs = Math.floor(seconds / 3600)
+    const mins = Math.floor((seconds % 3600) / 60)
+    const secs = seconds % 60
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+  }
 
-    {/* 分割线3 */}
-    <div className="h-8 bg-white/30 mx-3 shrink-0" style={{ width: 1 }} />
+  // 点击处理
+  const handleSourceClick = useCallback((source: RecordingSource) => {
+    if (status !== 'idle') return
+    if (source === 'area') {
+      setSelectedSource(source)
+      window.caplet.startAreaSelection()
+    } else if (source === 'window') {
+      // ...
+    } else {
+      setSelectedSource(source)
+      startPreWarming()
+      startCountdown()
+    }
+  }, [status, setSelectedSource, startCountdown])
 
-    {/* 关闭按钮 */}
-    <button
-      onClick={() => window.caplet.windowMinimize()}
-      className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-white/10 text-white/90 transition-colors shrink-0"
-      style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-      title="最小化到托盘"
+  return (
+    <div 
+      ref={containerRef}
+      className="inline-flex items-center h-[60px] px-3 rounded-[20px] select-none transition-all duration-300 overflow-hidden"
+      style={{
+        backgroundColor: '#111828', 
+        border: '3px solid #e2e8f0',
+        boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.1)',
+        boxSizing: 'border-box',
+        WebkitAppRegion: 'drag',
+      } as React.CSSProperties}
     >
-      <X size={18} strokeWidth={2} />
-    </button>
-  </div>
+      {/* 左侧按钮 */}
+      <CrispDivider />
+      {/* 中间区域 */}
+      <CrispDivider />
+      {/* 右侧音频开关 */}
+      <CrispDivider />
+      {/* 关闭按钮 */}
+    </div>
+  )
+}
+```
+
+### 工具条样式 (style)
+
+| 属性 | 值 |
+|------|---|
+| height | `60px` |
+| padding | `px-3` (12px) |
+| border-radius | `20px` (rounded-[20px]) |
+| backgroundColor | `#111828` |
+| border | `3px solid #e2e8f0` |
+| boxShadow | `inset 0 0 0 1px rgba(255,255,255,0.1)` |
+
+### CrispDivider 分割线
+
+```tsx
+const CrispDivider = () => (
+  <svg width="2" height="42" className="mx-2.5 shrink-0" shapeRendering="crispEdges">
+    <rect width="2" height="42" fill="#475569" />
+  </svg>
 )
 ```
+
+| 属性 | 值 |
+|------|---|
+| width | `2px` |
+| height | `42px` |
+| fill | `#475569` |
+| margin | `mx-2.5` |
+
+### Lucide 图标导入
+
+```typescript
+import { 
+  Settings, 
+  Monitor, 
+  AppWindow, 
+  Square, 
+  Video, 
+  SquareUser, 
+  Mic, 
+  MicOff, 
+  Volume2, 
+  VolumeX,
+  Pause,
+  Play,
+  Undo2,
+  X,
+  Headphones
+} from 'lucide-react'
+
+const sourceIcons: Record<RecordingSource, typeof Monitor> = {
+  display: Monitor,
+  window: AppWindow,
+  area: Square,
+  camera: Video
+}
+
+const sourceLabels: Record<RecordingSource, string> = {
+  display: '全屏',
+  window: '窗口',
+  area: '区域',
+  camera: '镜头'
+}
+```
+
+### 左侧：设置按钮
+
+```tsx
+<button
+  onClick={() => {}}
+  disabled={isRecording}
+  className="flex items-center justify-center w-9 h-9 rounded-xl transition-all duration-200 shrink-0 text-slate-300 hover:text-white hover:bg-[#1e293b] active:scale-95"
+  style={{ WebkitAppRegion: 'no-drag' }}
+  title="设置"
+>
+  <Settings size={20} strokeWidth={2} />
+</button>
+```
+
+### 中间：录制源 (idle)
+
+```tsx
+{['display', 'window', 'area', 'camera'].map((source) => (
+  <button
+    key={source}
+    onClick={() => handleSourceClick(source)}
+    className="flex flex-col items-center justify-center w-[62px] h-[46px] rounded-xl transition-all duration-200 hover:bg-[#1e293b] active:scale-95 text-slate-300 hover:text-white group"
+    title={titles[source]}
+  >
+    <IconComponent size={22} strokeWidth={1.5} className="group-hover:-translate-y-[1px]" />
+    <span className="text-[11px] mt-0.5 font-medium">{sourceLabels[source]}</span>
+  </button>
+))}
+```
+
+### 中间：录制控制 (recording/paused)
+
+```tsx
+<>
+  <div className="flex items-center gap-3 px-3">
+    <div 
+      className="w-2.5 h-2.5 rounded-full"
+      style={{ backgroundColor: isPaused ? '#fbbf24' : '#ef4444' }}
+    />
+    <span className="font-mono text-white/95 text-[16px]">
+      {formatTime(recordingTime)}
+    </span>
+  </div>
+  <div className="flex items-center gap-2 ml-3">
+    <button
+      className="flex items-center justify-center w-[42px] h-[42px] rounded-xl text-slate-300 hover:text-white hover:bg-[#1e293b] active:scale-95"
+      title={isPaused ? "恢复" : "暂停"}
+    >
+      {isPaused ? <Play size={20} strokeWidth={2.5} /> : <Pause size={20} strokeWidth={2.5} />}
+    </button>
+    <button
+      className="flex items-center justify-center w-[42px] h-[42px] rounded-xl text-red-400/90 hover:text-red-400 hover:bg-[#451a1e] active:scale-95"
+      title="停止录制"
+    >
+      <Square size={18} strokeWidth={2.5} fill="currentColor" />
+    </button>
+  </div>
+</>
+```
+
+### 中间：倒计时 (countdown)
+
+```tsx
+<div className="flex items-center justify-center gap-2 px-3">
+  <div className="flex items-center gap-2.5">
+    <div className="w-2.5 h-2.5 rounded-full bg-yellow-400 animate-pulse" />
+    <span className="font-mono text-yellow-400/95 text-[14px]">
+      即将开始: {countdownValue}s
+    </span>
+    {microphoneEnabled && systemAudioEnabled && (
+      <div className="ml-2 px-2.5 py-1 bg-[#42361b] rounded-lg border border-yellow-600/30">
+        <Headphones size={14} className="text-yellow-500/90" />
+        <span className="text-[11px]">建议戴耳机</span>
+      </div>
+    )}
+  </div>
+  <button className="flex items-center justify-center w-[42px] h-[42px] ml-2 text-slate-400 hover:text-slate-100 hover:bg-[#1e293b]">
+    <Undo2 size={20} strokeWidth={2} />
+  </button>
+</div>
+```
+
+### 右侧：音频开关
+
+```tsx
+<button
+  onClick={() => {
+    const newValue = !microphoneEnabled
+    setMicrophoneEnabled(newValue)
+    if (status === 'recording' || status === 'countdown') {
+      audioMixer.setGain('microphone', newValue ? 1 : 0)
+    }
+  }}
+  className={`flex items-center gap-1.5 px-3 h-[42px] rounded-xl border ${
+    microphoneEnabled 
+      ? 'bg-[#1e293b] text-white border-[#475569]' 
+      : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-[#1e293b]'
+  }`}
+>
+  {microphoneEnabled ? <Mic size={20} strokeWidth={1.5} /> : <MicOff size={20} strokeWidth={1.5} />}
+  <span className="text-[13px]">麦克风</span>
+</button>
+```
+
+### 右侧：关闭按钮
+
+```tsx
+<button
+  onClick={() => window.caplet.windowMinimize()}
+  className="flex items-center justify-center w-9 h-9 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-[#1e293b] transition-all duration-200 shrink-0 active:scale-95"
+  style={{ WebkitAppRegion: 'no-drag' }}
+  title="最小化到托盘"
+>
+  <X size={20} strokeWidth={2} />
+</button>
+```
+
+---
+
+## 样式常量
+
+### 颜色
+
+| 用途 | 颜色 |
+|------|------|
+| 工具条背景 | `#111828` |
+| 工具条边框 | `#e2e8f0` |
+| 分割线 | `#475569` |
+| 按钮悬停 | `#1e293b` |
+| 激活边框 | `#475569` |
+| 录制指示灯 | `#ef4444` |
+| 暂停指示灯 | `#fbbf24` |
+| 倒计时文字 | `#facc15` |
+| 警告提示背景 | `#42361b` |
+| 停止按钮悬停 | `#451a1e` |
+
+### 尺寸
+
+| 用途 | 尺寸 |
+|------|------|
+| 工具条高度 | `60px` |
+| 工具条内边距 | `12px` |
+| 工具条圆角 | `20px` |
+| 工具条边框 | `3px` |
+| 分割线宽度 | `2px` |
+| 分割线高度 | `42px` |
+| 分割线边距 | `10px` |
+| 小按钮尺寸 | `36px` |
+| 中按钮尺寸 | `42px` |
+| 录制源按钮 | `62px × 46px` |

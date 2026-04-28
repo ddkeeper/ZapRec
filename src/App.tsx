@@ -541,7 +541,7 @@ const stopRecording = useCallback(() => {
   }, [])
 
   return (
-    <div className="h-screen w-screen overflow-hidden">
+    <div className="w-max h-max overflow-hidden pointer-events-none flex items-start justify-start">
       <Toolbar
         onStartRecording={startRecording}
         onStopRecording={stopRecording}

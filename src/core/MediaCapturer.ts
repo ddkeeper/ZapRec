@@ -151,19 +151,15 @@ async startDisplayCapture(
   async startMicrophoneCapture(): Promise<MediaStream> {
     this.stopMicrophoneCapture()
     
-    this.microphoneStream = await navigator.mediaDevices.getUserMedia({
+this.microphoneStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        sampleRate: 48000,
-        googNoiseSuppression2: true,
-        googHighpassFilter: false,
-        googTypingNoiseDetection: false
-      } as any,
+        echoCancellation: true, // 开启原生软件回声消除（尽力而为）
+        noiseSuppression: true, // 开启原生降噪（压制风扇、底噪）
+        autoGainControl: true,  // 开启自动增益（说话忽大忽小会自动拉平）
+        sampleRate: 48000       // 锁定采样率，与 AudioContext 保持绝对一致
+      },
       video: false
     })
-    
     return this.microphoneStream
   }
 
