@@ -1,34 +1,162 @@
-在当前录屏软件项目的基础上，需要进一步开发设置面板界面和相关的状态可持久化：
+# 托盘菜单动态更新修复方案
 
-### 现有资源
-1. 需求文档 setting-panel.md，包含设置面板所有功能需求、字段定义、交互规则、默认配置项
-2. 设置面板的 UI 源码 Settings-Panel-Architecture 目录，是纯React静态UI界面，无业务交互、无数据绑定、无持久化、未集成项目
+## 1. 暴露状态同步 API (Preload 层)
+**文件**: `src/preload/index.ts`
+**目标**: 增加一个向主进程发送当前 App 状态的通道。
 
-### 项目基础信息（请自行替换括号内容）
-- 技术栈：React(版本) + (TS/JS) + (Electron/纯Web)
-- 状态管理：(Zustand/Redux/React Context)
-- 样式方案：(Tailwind/SCSS/UI组件库)
-- 配置持久化：采用(electron-store/localStorage/本地JSON文件)
-- 现有项目规范：遵循原有目录结构、代码风格、组件命名规则，不擅自重构项目基础架构
+```typescript
+// 在暴露的 api 对象中追加 updateAppState
+export const api = {
+  // ... 其他已有 api ...
 
-### 你的开发任务
-1. 完整解读 setting-panel.md 所有需求，梳理设置项清单、默认值、校验规则、交互逻辑
-2. 基于现有 Settings-Panel-Architecture React UI源码做改造适配，适配现有的项目结构和功能，比如点击工具条上的设置按钮即弹出设置面板；
-3. 开发**配置记忆持久化逻辑**：
-   - 定义全局配置TS类型/配置对象
-   - 实现配置读取、保存、重置、恢复默认功能
-   - 程序重启后自动加载上次设置
-4. 将改造后的设置面板组件**集成到当前录屏项目目录下**，改造完成以后需要把对应的源码文件移入到项目根目录的合适子目录中：
-   - 对接项目全局状态，设置项可全局生效
-   - 输出可直接拷贝合并的代码、文件迁移路径
+  // 同步状态到主进程用于更新托盘菜单
+  updateAppState: (state: { status: string; source: string }) => {
+    ipcRenderer.send('update-app-state', state)
+  }
+}
+```
 
-### 交付要求
-1. 先输出：需求梳理清单
-2. 确定方案和 UI 原型文件里可直接使用的前端代码后实现相应的代码
-3. 代码注释清晰，兼容原有项目，无冗余逻辑，严格对齐需求文档
+---
 
-硬性约束：
-1. 不改动原有 Settings-Panel-Architecture 的UI结构和样式类名，只加逻辑
-2. 复用项目现有工具、hooks、样式变量，不重复造轮子
-3. 所有配置字段严格和 setting-panel.md 一一对应，不能新增/删减需求外的配置
-4. 代码采用函数式组件，不写class组件，遵循React最新规范
+## 2. 监听状态并推送 (UI 渲染层)
+**文件**: `src/App.tsx`
+**目标**: 在 React 组件中监听 Zustand store 的状态变化，并实时推送到主进程。
+
+```tsx
+import { useEffect } from 'react'
+import { useAppStore } from './store/useAppStore'
+
+export default function App() {
+  // 1. 提取出当前录制状态和录制源
+  const status = useAppStore(state => state.status) 
+  const selectedSource = useAppStore(state => state.selectedSource)
+
+  // 2. 状态改变时，通知主进程更新托盘
+  useEffect(() => {
+    const caplet = window.caplet as any
+    if (caplet && caplet.updateAppState) {
+      caplet.updateAppState({
+        status: status,
+        source: selectedSource
+      })
+    }
+  }, [status, selectedSource])
+  
+  // ... 其他代码 ...
+}
+```
+
+---
+
+## 3. 重构托盘菜单逻辑 (主进程 Main)
+**文件**: `src/main/index.ts`
+**目标**: 接收状态并动态重建托盘菜单，高度复用已有的快捷键事件和 `showToolbar` 逻辑。
+
+```typescript
+import { app, Tray, Menu, nativeImage, ipcMain } from 'electron'
+import fs from 'fs'
+import path from 'path'
+
+// 1. 定义全局状态缓存
+let currentAppState = { status: 'idle', source: 'display' }
+
+// 2. 抽离托盘菜单构建逻辑
+function updateTrayMenu() {
+  if (!tray) return
+
+  // 解析当前状态
+  const isIdle = currentAppState.status === 'idle'
+  const isRecording = currentAppState.status === 'recording'
+  const isPaused = currentAppState.status === 'paused'
+  const isCameraMode = currentAppState.source === 'camera'
+
+  // 根据当前状态决定第一项显示内容
+  let startPauseLabel = '开始'
+  if (isRecording) startPauseLabel = '暂停'
+  if (isPaused) startPauseLabel = '继续'
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: startPauseLabel,
+      click: () => {
+        // 复用快捷键的触发逻辑
+        if (isIdle) {
+          mainWindow?.webContents.send('shortcut:toggle-record')
+        } else {
+          mainWindow?.webContents.send('shortcut:toggle-pause')
+        }
+      }
+    },
+    {
+      label: '停止',
+      enabled: !isIdle, // 空闲状态下不可点击
+      click: () => {
+        if (!isIdle) {
+          // 在非空闲状态下，触发 toggle-record 就会执行停止逻辑
+          mainWindow?.webContents.send('shortcut:toggle-record') 
+        }
+      }
+    },
+    {
+      label: '显示小窗',
+      // 仅在纯摄像头模式且正在录制（或暂停）阶段才会显示该选项
+      visible: isCameraMode && !isIdle, 
+      click: () => {
+        if (cameraRecordingWindow && !cameraRecordingWindow.isVisible()) {
+          cameraRecordingWindow.show()
+        }
+      }
+    },
+    {
+      label: '设置',
+      click: () => {
+        // 复用已存在的打开设置事件监听
+        ipcMain.emit('open-settings') 
+      }
+    },
+    {
+      label: '打开主面板',
+      click: () => {
+        // 复用封装好的工具条显示函数
+        showToolbar() 
+      }
+    },
+    {
+      label: '退出程序',
+      click: () => app.quit()
+    }
+  ])
+
+  // 更新菜单
+  tray.setContextMenu(contextMenu)
+}
+
+// 3. 修改原有的 createTray 函数
+function createTray() {
+  const iconPath = getIconPath(16)
+  let icon: Electron.NativeImage
+  
+  if (fs.existsSync(iconPath)) {
+    icon = nativeImage.createFromPath(iconPath)
+  } else {
+    icon = nativeImage.createFromDataURL('data:image/png;base64,...') // 保持原有 base64 不变
+  }
+  
+  tray = new Tray(icon)
+  tray.setToolTip('ZapRec')
+  
+  // 修改：点击托盘图标也调用统一的工具条显示逻辑
+  tray.on('click', () => {
+    showToolbar()
+  })
+
+  // 初始构建一次菜单
+  updateTrayMenu()
+}
+
+// 4. 监听来自渲染进程的状态更新
+ipcMain.on('update-app-state', (_, state) => {
+  currentAppState = state
+  updateTrayMenu() // 状态改变，重新渲染菜单文字和可见性
+})
+```

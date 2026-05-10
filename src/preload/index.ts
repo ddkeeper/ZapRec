@@ -14,6 +14,32 @@ const api = {
   windowClose: () => ipcRenderer.invoke('window-close'),
   resizeToolbar: (width: number, height: number) => ipcRenderer.send('resize-toolbar', { width, height }),
 
+  // Settings API
+  settingsLoad: () => ipcRenderer.invoke('settings-load'),
+  settingsSet: (key: string, value: unknown) => ipcRenderer.invoke('settings-set', key, value),
+  settingsReset: () => ipcRenderer.invoke('settings-reset'),
+
+  // File API
+  getRecordings: (path: string) => ipcRenderer.invoke('get-recordings', path),
+  deleteRecordings: (paths: string[]) => ipcRenderer.invoke('delete-recordings', paths),
+  openInFolder: (path: string) => ipcRenderer.invoke('open-in-folder', path),
+
+  // Settings Window
+  openSettings: () => ipcRenderer.send('open-settings'),
+  closeSettings: () => ipcRenderer.send('close-settings'),
+  showToolbar: () => ipcRenderer.send('show-toolbar'),
+  hideToolbar: () => ipcRenderer.send('hide-toolbar'),
+  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
+  settingsWindowMinimize: () => ipcRenderer.invoke('settings-window-minimize'),
+  getAppName: () => ipcRenderer.invoke('get-app-name'),
+  
+  // Settings Sync 监听
+  onSettingsSync: (callback: (settings: Record<string, unknown>) => void) => {
+    const handler = (_: unknown, settings: Record<string, unknown>) => callback(settings)
+    ipcRenderer.on('settings-sync', handler)
+    return () => ipcRenderer.removeListener('settings-sync', handler)
+  },
+
   startAreaSelection: () => ipcRenderer.send('start-area-selection'),
   cancelAreaSelection: () => ipcRenderer.send('cancel-area-selection'),
   sendAreaSelected: (area: { x: number; y: number; width: number; height: number }) => ipcRenderer.send('area-selected', area),
@@ -54,10 +80,24 @@ const api = {
     ipcRenderer.on('shortcut:toggle-pause', handler)
     return () => ipcRenderer.removeListener('shortcut:toggle-pause', handler)
   },
+  onShortcutToggleVisibility: (callback: () => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('shortcut:toggle-visibility', handler)
+    return () => ipcRenderer.removeListener('shortcut:toggle-visibility', handler)
+  },
 
-  startWindowPicker: () => ipcRenderer.send('start-window-picker'),
-  cancelWindowPicker: () => ipcRenderer.send('cancel-window-picker'),
+  updateRecordingStatus: (status: 'idle' | 'countdown' | 'recording' | 'paused' | 'processing') => ipcRenderer.send('update-recording-status', status),
+
+  startWindowPicker: () => {
+    console.log('[Preload] startWindowPicker called')
+    ipcRenderer.send('start-window-picker')
+  },
+  cancelWindowPicker: () => {
+    console.log('[Preload] cancelWindowPicker called')
+    ipcRenderer.send('cancel-window-picker')
+  },
   sendWindowSelected: (windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => {
+    console.log('[Preload] sendWindowSelected called:', windowData.name)
     ipcRenderer.send('window-selected', windowData)
   },
   
@@ -164,7 +204,15 @@ const api = {
     return () => ipcRenderer.removeListener('concat-failed', handler)
   },
 
-  renameFile: (oldPath: string, newPath: string) => ipcRenderer.send('rename-file', { oldPath, newPath })
+  onNavigateTab: (callback: (tabId: string) => void) => {
+    const handler = (_: unknown, tabId: string) => callback(tabId)
+    ipcRenderer.on('navigate-to-tab', handler)
+    return () => ipcRenderer.removeListener('navigate-to-tab', handler)
+  },
+
+  renameFile: (oldPath: string, newPath: string) => ipcRenderer.send('rename-file', { oldPath, newPath }),
+
+  updateAppState: (state: { status: string; source: string }) => ipcRenderer.send('update-app-state', state)
 }
 
-contextBridge.exposeInMainWorld('caplet', api)
+contextBridge.exposeInMainWorld('screenApi', api)

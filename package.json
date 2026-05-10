@@ -1,5 +1,5 @@
 {
-  "name": "zaprec",
+  "name": "screen",
   "version": "0.1.0",
   "description": "极简录屏工具 - 追求极致轻量、零等待导出的桌面录屏工具",
   "main": "dist-electron/main/index.js",

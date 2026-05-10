@@ -61,7 +61,8 @@ export default defineConfig({
         main: path.resolve(__dirname, 'index.html'),
         'window-picker': path.resolve(__dirname, 'window-picker.html'),
         'camera-preview': path.resolve(__dirname, 'camera-preview.html'),
-        'pip-window': path.resolve(__dirname, 'pip-window.html')
+        'pip-window': path.resolve(__dirname, 'pip-window.html'),
+        'settings': path.resolve(__dirname, 'settings.html')
       }
     }
   }

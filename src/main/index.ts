@@ -1,8 +1,9 @@
-import { app, BrowserWindow, ipcMain, desktopCapturer, Tray, Menu, globalShortcut, nativeImage, shell, dialog, protocol, screen, session, systemPreferences } from 'electron'
+﻿import { app, BrowserWindow, ipcMain, desktopCapturer, Tray, Menu, globalShortcut, nativeImage, shell, dialog, protocol, screen, session, systemPreferences } from 'electron'
 import path from 'path'
 import fs from 'fs'
 import { fileURLToPath } from 'url'
 import ffmpeg from 'fluent-ffmpeg'
+import { DISPLAY_NAME } from '../config'
 
 const getFFmpegPath = (): string => {
   const isPacked = app.isPackaged
@@ -20,18 +21,80 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // ============================================
-// GPU 调优参数 - WebCodecs 硬件加速
+// GPU tuning parameters - WebCodecs hardware acceleration
 // ============================================
 app.commandLine.appendSwitch('enable-features', 'WebCodecsVideoEncoderHardwareAcceleration')
 app.commandLine.appendSwitch('offscreen-use-shared-texture')
-// app.commandLine.appendSwitch('disable-gpu-sandbox') // 仅在老旧显卡驱动崩溃时启用
-
+// app.commandLine.appendSwitch('disable-gpu-sandbox') // only enable when old graphics card driver crashes
 // ============================================
-// 注册 Secure Context 协议 (WebCodecs 需要)
+// Register Secure Context protocol (WebCodecs needs)
 // ============================================
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'caplet', privileges: { standard: true, secure: true, supportFetchAPI: true } }
+  { scheme: 'screen', privileges: { standard: true, secure: true, supportFetchAPI: true } }
 ])
+
+// Simple JSON file-based settings store
+let settingsData: Record<string, unknown> = {}
+let settingsLoaded = false
+
+const DEFAULT_SETTINGS_DATA = {
+  general: {
+    countdownSeconds: 3,
+    fps: 60,
+    resolution: 'original',
+    minimizeToTrayOnClose: true,
+  },
+  shortcuts: {
+    toggleRecord: 'Alt+Shift+R',
+    togglePause: 'Alt+Shift+P',
+    toggleVisibility: 'Alt+Shift+H',
+  },
+  storage: {
+    saveDirectory: '',
+    filenamePrefix: DISPLAY_NAME,
+    filenameTemplate: '{app}_{date}_{time}',
+  },
+  lastState: {
+    microphoneEnabled: false,
+    systemAudioEnabled: false,
+    pipEnabled: false,
+  },
+}
+
+function getSettingsFilePath() {
+  return path.join(app.getPath('userData'), 'config.json')
+}
+
+function loadSettings() {
+  const filePath = getSettingsFilePath()
+  try {
+    if (fs.existsSync(filePath)) {
+      const data = fs.readFileSync(filePath, 'utf-8')
+      settingsData = { ...DEFAULT_SETTINGS_DATA, ...JSON.parse(data) }
+    } else {
+      settingsData = { ...DEFAULT_SETTINGS_DATA }
+      settingsData.storage = { saveDirectory: app.getPath('downloads') }
+    }
+  } catch (e) {
+    console.error('[Main] Failed to load settings:', e)
+    settingsData = { ...DEFAULT_SETTINGS_DATA }
+  }
+  settingsLoaded = true
+}
+
+function saveSettings() {
+  if (!settingsLoaded) return
+  const filePath = getSettingsFilePath()
+  try {
+    const dir = path.dirname(filePath)
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+    fs.writeFileSync(filePath, JSON.stringify(settingsData, null, 2), 'utf-8')
+  } catch (e) {
+    console.error('[Main] Failed to save settings:', e)
+  }
+}
 
 // Simple in-memory store instead of electron-store
 const store: Record<string, unknown> = {}
@@ -44,7 +107,7 @@ let cameraRecordingWindow: BrowserWindow | null = null
 let cameraPreviewConfirming = false
 let currentCameraDeviceId = ''
 let pipWindow: BrowserWindow | null = null
-let tray: Tray | null = null
+let settingsWindow: BrowserWindow | null = null
 let writeStream: fs.WriteStream | null = null
 
 const CAMERA_SIZES = {
@@ -56,7 +119,7 @@ let currentCameraSizeTier: 'sm' | 'md' | 'lg' = 'md'
 
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
 
-// 图标路径（开发环境使用 scripts/build，生产环境使用资源目录）
+// Icon path (use scripts/build in dev, resources directory in production)
 function getIconPath(size?: number): string {
   const isDev = !!VITE_DEV_SERVER_URL
   const basePath = isDev 
@@ -92,28 +155,27 @@ function createWindow() {
   })
 
   if (VITE_DEV_SERVER_URL) {
-    console.log('[ZapRec] Loading from dev server:', VITE_DEV_SERVER_URL)
+    console.log('[Screen] Loading from dev server:', VITE_DEV_SERVER_URL)
     mainWindow.loadURL(VITE_DEV_SERVER_URL)
     mainWindow.webContents.on('did-fail-load', (_, errorCode, errorDescription) => {
-      console.error('[ZapRec] Failed to load:', errorCode, errorDescription)
+      console.error('[Screen] Failed to load:', errorCode, errorDescription)
     })
     mainWindow.webContents.on('did-finish-load', () => {
-      console.log('[ZapRec] Finished loading')
+      console.log('[Screen] Finished loading')
     })
     mainWindow.webContents.on('console-message', (_, level, message) => {
       const levels = ['verbose', 'info', 'warning', 'error']
       console.log(`[Renderer ${levels[level]}]:`, message)
     })
     mainWindow.webContents.on('render-process-gone', (_, details) => {
-      console.error('[ZapRec] Renderer process gone:', details)
+      console.error('[Screen] Renderer process gone:', details)
     })
   } else {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'))
   }
 
   mainWindow.on('close', () => {
-    // 级联生命周期管理：主窗口关闭时同步销毁所有附属窗口
-    destroySelectionWindow()
+    // Cascade lifecycle management: destroy all child windows when main window closes
     destroyWindowPickerWindow()
     destroyPipWindow()
   })
@@ -123,6 +185,97 @@ function createWindow() {
   })
 }
 
+let tray: Tray | null = null
+let currentAppState = { status: 'idle', source: 'display' }
+
+function updateTrayIcon() {
+  if (!tray) return
+  const isRecording = currentAppState.status === 'recording' || currentAppState.status === 'paused'
+  const iconName = isRecording ? 'icon-16x16-red.png' : 'icon-16x16.png'
+  
+  let iconPath = getIconPath(16).replace('icon-16x16.png', iconName)
+  let icon: Electron.NativeImage
+  
+  if (fs.existsSync(iconPath)) {
+    icon = nativeImage.createFromPath(iconPath)
+  } else {
+    // Fallback base64 or default icon
+    icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADASURBVDiNpdMxSgNBHAbgb7OFYGFhIVhYWFhYWIiFhVhYiIWFYGFhYWEhFhYWYiEWYiEWPjAw8IGm8WKz2WQ0+5LP7M7M+76ZNdmHGGMSIAXmQB44AAfgCnyAh5AHtoAFUACOgD3wDLyAHbCVS1D4bCWWs1R6zSUoAiZJkvRP4l+BEnAFXoE7sAYWwBBYAH1x+8fCJXCWe/y9gB1wA+5S10dRFPX+KqkHiA8f4i+Bd+AFrIJgPQdawBVYAs/AB9gFG2AN7CXJ7gP0B5e8y2b+4Q7kAQAAAABJRU5ErkJggg==')
+  }
+  
+  tray.setImage(icon)
+}
+
+function updateTrayMenu() {
+  console.log('[Main] updateTrayMenu called, currentAppState:', currentAppState)
+  if (!tray) return
+
+  const isIdle = currentAppState.status === 'idle'
+  const isRecording = currentAppState.status === 'recording'
+  const isPaused = currentAppState.status === 'paused'
+  const isCameraMode = currentAppState.source === 'camera'
+
+  let startPauseLabel = '开始录制'
+  if (isRecording) startPauseLabel = '暂停'
+  if (isPaused) startPauseLabel = '继续'
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: startPauseLabel,
+      click: () => {
+        if (isIdle) {
+          mainWindow?.webContents.send('shortcut:toggle-record')
+        } else {
+          mainWindow?.webContents.send('shortcut:toggle-pause')
+        }
+      }
+    },
+    {
+      label: '停止录制',
+      enabled: !isIdle,
+      click: () => {
+        mainWindow?.webContents.send('shortcut:toggle-record')
+      }
+    },
+    {
+      label: '显示小窗',
+      visible: isCameraMode && !isIdle,
+      click: () => {
+        if (cameraRecordingWindow && !cameraRecordingWindow.isDestroyed()) {
+          if (cameraRecordingWindow.isVisible()) {
+            cameraRecordingWindow.focus()
+          } else {
+            const win = cameraRecordingWindow
+            win.setOpacity(0)
+            win.showInactive()
+            setTimeout(() => {
+              win.setOpacity(1)
+            }, 20)
+          }
+        }
+      }
+    },
+    {
+      label: '设置',
+      click: () => {
+        ipcMain.emit('open-settings')
+      }
+    },
+    {
+      label: '打开主面板',
+      click: () => {
+        showToolbar()
+      }
+    },
+    {
+      label: '退出',
+      click: () => app.quit()
+    }
+  ])
+
+  tray.setContextMenu(contextMenu)
+}
+
 function createTray() {
   const iconPath = getIconPath(16)  // 托盘使用 16x16 图标
   let icon: Electron.NativeImage
@@ -130,40 +283,53 @@ function createTray() {
   if (fs.existsSync(iconPath)) {
     icon = nativeImage.createFromPath(iconPath)
   } else {
-    // 回退到内联的简单图标
     icon = nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAAdgAAAHYBTnsmCAAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAADASURBVDiNpdMxSgNBHAbgb7OFYGFhIVhYWFhYWIiFhVhYiIWFYGFhYWEhFhYWYiEWYiEWPjAw8IGm8WKz2WQ0+5LP7M7M+76ZNdmHGGMSIAXmQB44AAfgCnyAh5AHtoAFUACOgD3wDLyAHbCVS1D4bCWWs1R6zSUoAiZJkvRP4l+BEnAFXoE7sAYWwBBYAH1x+8fCJXCWe/y9gB1wA+5S10dRFPX+KqkHiA8f4i+Bd+AFrIJgPQdawBVYAs/AB9gFG2AN7CXJ7gP0B5e8y2b+4Q7kAQAAAABJRU5ErkJggg==')
   }
   
   tray = new Tray(icon)
 
-  tray.setToolTip('ZapRec')
+  tray.setToolTip(DISPLAY_NAME)
   
-  const contextMenu = Menu.buildFromTemplate([
-    { label: '显示主窗口', click: () => mainWindow?.show() },
-    { label: '显示摄像头小窗', click: () => {
-      if (cameraRecordingWindow && !cameraRecordingWindow.isVisible()) {
-        cameraRecordingWindow.show()
-      }
-    }},
-    { type: 'separator' },
-    { label: '退出', click: () => app.quit() }
-  ])
-  
-  tray.setContextMenu(contextMenu)
+  updateTrayMenu()
   
   tray.on('click', () => {
-    mainWindow?.show()
+    showToolbar()
   })
 }
 
 function registerShortcuts() {
-  globalShortcut.register('CommandOrControl+Shift+R', () => {
+  const shortcutsData = (settingsData as any).shortcuts || {}
+  const toggleRecordKey = shortcutsData.toggleRecord || 'Alt+Shift+R'
+  const togglePauseKey = shortcutsData.togglePause || 'Alt+Shift+P'
+  const toggleVisibilityKey = shortcutsData.toggleVisibility || 'Alt+Shift+H'
+  
+  globalShortcut.register(toggleRecordKey, () => {
     mainWindow?.webContents.send('shortcut:toggle-record')
   })
   
-  globalShortcut.register('CommandOrControl+Shift+P', () => {
+  globalShortcut.register(togglePauseKey, () => {
     mainWindow?.webContents.send('shortcut:toggle-pause')
   })
+  
+  globalShortcut.register(toggleVisibilityKey, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isVisible()) {
+        mainWindow.hide()
+      } else {
+        const win = mainWindow!
+        win.setOpacity(0)
+        win.showInactive()
+        setTimeout(() => {
+          win.setOpacity(1)
+        }, 20)
+      }
+    }
+  })
+}
+
+function updateShortcuts() {
+  globalShortcut.unregisterAll()
+  registerShortcuts()
 }
 
 ipcMain.handle('get-sources', async (_, types: string[]) => {
@@ -187,6 +353,145 @@ ipcMain.handle('get-settings', () => {
 
 ipcMain.handle('set-setting', (_, key: string, value: unknown) => {
   store[key] = value
+})
+
+ipcMain.handle('get-app-name', () => {
+  return app.getName()
+})
+
+ipcMain.handle('select-directory', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openDirectory']
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+
+ipcMain.handle('settings-load', () => {
+  return settingsData
+})
+
+ipcMain.handle('settings-set', (_, key: string, value: unknown) => {
+  const keys = key.split('.')
+  if (keys.length === 2) {
+    ;(settingsData as any)[keys[0]] = {
+      ...(settingsData as any)[keys[0]],
+      [keys[1]]: value
+    }
+  } else {
+    settingsData[key] = value
+  }
+  saveSettings()
+  
+  if (key.startsWith('shortcuts.')) {
+    updateShortcuts()
+  }
+  
+  mainWindow?.webContents.send('settings-sync', settingsData)
+})
+
+ipcMain.handle('settings-reset', () => {
+  settingsData = { ...DEFAULT_SETTINGS_DATA }
+  settingsData.storage = { saveDirectory: app.getPath('downloads') }
+  saveSettings()
+  return settingsData
+})
+
+ipcMain.handle('get-recordings', async (_, dirPath: string) => {
+  try {
+    const files = fs.readdirSync(dirPath)
+    const recordings = files
+      .filter(f => f.endsWith('.mp4'))
+      .map(f => {
+        const filePath = path.join(dirPath, f)
+        const stats = fs.statSync(filePath)
+        return {
+          id: f,
+          name: f,
+          path: filePath,
+          size: stats.size,
+          sizeFormatted: formatFileSize(stats.size),
+          date: stats.mtime.toISOString()
+        }
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    return recordings
+  } catch {
+    return []
+  }
+})
+
+ipcMain.handle('delete-recordings', async (_, filePaths: string[]) => {
+  for (const filePath of filePaths) {
+    try {
+      fs.unlinkSync(filePath)
+    } catch (e) {
+      console.error('[Main] Failed to delete:', filePath, e)
+    }
+  }
+  return { success: true }
+})
+
+ipcMain.handle('open-in-folder', (_, filePath: string) => {
+  shell.showItemInFolder(filePath)
+})
+
+ipcMain.on('open-settings', () => {
+  if (mainWindow) {
+    mainWindow.hide()
+  }
+  createSettingsWindow()
+})
+
+ipcMain.on('close-settings', () => {
+  destroySettingsWindow()
+  setTimeout(() => {
+    showToolbar()
+  }, 50)
+})
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
+}
+
+ipcMain.handle('window-minimize', () => {
+  mainWindow?.minimize()
+})
+
+ipcMain.handle('window-maximize', () => {
+  if (settingsWindow) {
+    if (settingsWindow.isMaximized()) {
+      settingsWindow.unmaximize()
+    } else {
+      settingsWindow.maximize()
+    }
+  } else {
+    // 工具条窗口不需要最大化，只显示窗口
+    showToolbar()
+  }
+})
+
+ipcMain.handle('settings-window-minimize', () => {
+  settingsWindow?.minimize()
+})
+
+ipcMain.handle('window-close', () => {
+  mainWindow?.close()
+})
+
+ipcMain.on('resize-toolbar', (_, { width, height }) => {
+  if (mainWindow) {
+    mainWindow.setSize(width, height)
+  }
+})
+
+ipcMain.on('update-app-state', (_, state: { status: string; source: string }) => {
+  console.log('[Main] update-app-state received:', state)
+  currentAppState = state
+  updateTrayMenu()
+  updateTrayIcon()
 })
 
 ipcMain.handle('stream-start', async (_, filepath: string) => {
@@ -249,27 +554,6 @@ ipcMain.handle('get-default-save-path', () => {
   return app.getPath('downloads')
 })
 
-ipcMain.handle('select-directory', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openDirectory']
-  })
-  return result.canceled ? null : result.filePaths[0]
-})
-
-ipcMain.handle('window-minimize', () => {
-  mainWindow?.minimize()
-})
-
-ipcMain.handle('window-close', () => {
-  mainWindow?.close()
-})
-
-ipcMain.on('resize-toolbar', (_, { width, height }) => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setSize(width, height)
-  }
-})
-
 function createSelectionWindow() {
   if (selectionWindow) {
     selectionWindow.close()
@@ -279,7 +563,7 @@ function createSelectionWindow() {
   const baseUrl = rawUrl.split('#')[0]
   const selectionUrl = `${baseUrl}#/area-selection`
 
-  // 获取主显示器的物理坐标和尺寸，避免 fullscreen 模式下系统注入的缩放热区
+  // Get primary display coordinates and size, avoid scaling hotzones in fullscreen mode
   const { x, y, width, height } = screen.getPrimaryDisplay().bounds
 
   selectionWindow = new BrowserWindow({
@@ -296,9 +580,8 @@ function createSelectionWindow() {
     resizable: false,
     minimizable: false,
     maximizable: false,
-    // 关键：toolbar 类型窗口在 Windows 下不具备标准边框交互，避免边缘触发缩放
-    type: 'toolbar',
-    // 锁死最大最小尺寸，彻底阻止系统层面的 resize 判定
+    // Key: toolbar type window doesn't have standard border in Windows, avoid edge-triggered scaling    type: 'toolbar',
+    // Lock min/max sizes, completely block system-level resize determination
     minWidth: width,
     maxWidth: width,
     minHeight: height,
@@ -319,19 +602,17 @@ function createSelectionWindow() {
   selectionWindow.setResizable(false)
   selectionWindow.setMovable(false)
   
-  // 极简与纯净：强制将选区/阴影幕布提升到比普通 alwaysOnTop 更高的 'screen-saver' 层级，
-  // 确保它绝对不会被新打开的应用窗口覆盖而导致阴影失效。
-  selectionWindow.setAlwaysOnTop(true, 'screen-saver')
+  // Pure and clean: force selection/shadow overlay to alwaysOnTop='screen-saver' level, higher than normal windows  selectionWindow.setAlwaysOnTop(true, 'screen-saver')
 
   selectionWindow.loadURL(selectionUrl)
 
-  // 终极修复：彻底禁用 Windows 下全屏无边框窗口边缘触发的缩放光标
+  // Ultimate fix: completely block Windows fullscreen borderless window edge-triggered scaling light arrow
   if (process.platform === 'win32') {
     selectionWindow.hookWindowMessage(0x0084, (_e, result) => {
       // 0x0084 = WM_NCHITTEST
-      // HTCLIENT = 1，告诉系统这是普通客户区，不是边框，不会出现缩放箭头
+      // HTCLIENT = 1, tell system this is normal client area, not border, no scaling arrow
       result.writeInt32LE(1, 0)
-      return true // 阻止 Electron 继续处理这个消息
+      return true // Block Electron from handling this message
     })
   }
 
@@ -358,7 +639,7 @@ function destroySelectionWindow() {
 }
 
 // ============================================
-// 窗口选择器独立窗口
+// Window picker independent window
 // ============================================
 function createWindowPickerWindow() {
   if (windowPickerWindow) {
@@ -424,7 +705,7 @@ function destroyWindowPickerWindow() {
 }
 
 // ============================================
-// 摄像头预览独立窗口
+// Camera preview independent window
 // ============================================
 function createCameraPreviewWindow() {
   if (cameraPreviewWindow) {
@@ -476,8 +757,7 @@ function createCameraPreviewWindow() {
 }
 
 // ============================================
-// 画中画悬浮窗
-// ============================================
+// 画中画悬浮n/ ============================================
 const PIP_SIZES = {
   sm: 140,
   md: 200,
@@ -581,9 +861,10 @@ function destroyPipWindow() {
 }
 
 // ============================================
-// 窗口选择器 IPC
+// Window picker IPC
 // ============================================
 ipcMain.on('start-window-picker', () => {
+  console.log('[Main] start-window-picker received')
   if (mainWindow) {
     mainWindow.hide()
   }
@@ -591,23 +872,77 @@ ipcMain.on('start-window-picker', () => {
 })
 
 ipcMain.on('cancel-window-picker', () => {
+  console.log('[Main] cancel-window-picker received')
   destroyWindowPickerWindow()
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.webContents.send('window-selection-cancelled')
-  }
+  showToolbar()
+  mainWindow?.webContents.send('window-selection-cancelled')
 })
 
 ipcMain.on('window-selected', (_, windowData: { id: string; name: string; thumbnail: string; appIcon: string | null }) => {
+  console.log('[Main] window-selected received:', windowData.name)
   destroyWindowPickerWindow()
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.webContents.send('window-selected', windowData)
-  }
+  showToolbar()
+  mainWindow?.webContents.send('window-selected', windowData)
 })
 
 // ============================================
-// 摄像头预览 IPC
+// Settings Window
+// ============================================
+function createSettingsWindow() {
+  if (settingsWindow) {
+    settingsWindow.show()
+    if (settingsWindow.isMinimized()) {
+      settingsWindow.restore()
+    }
+    settingsWindow.focus()
+    return
+  }
+
+  const iconPath = getIconPath(256)
+
+  settingsWindow = new BrowserWindow({
+    width: 800,
+    height: 560,
+    frame: false,
+    resizable: true,
+    minimizable: true,
+    maximizable: true,
+    skipTaskbar: false,
+    backgroundColor: '#ffffff',
+    icon: iconPath,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/index.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+
+  if (VITE_DEV_SERVER_URL) {
+    settingsWindow.loadURL(`${VITE_DEV_SERVER_URL.replace('/index.html', '')}/settings.html`)
+  } else {
+    settingsWindow.loadFile(path.join(__dirname, '../../dist/settings.html'))
+  }
+
+  settingsWindow.once('ready-to-show', () => {
+    settingsWindow?.show()
+  })
+
+  settingsWindow.on('closed', () => {
+    settingsWindow = null
+  })
+}
+
+function destroySettingsWindow() {
+  if (settingsWindow) {
+    settingsWindow.close()
+    settingsWindow = null
+  }
+}
+
+// ============================================
+// Camera preview IPC
 // ============================================
 ipcMain.on('start-camera-preview', () => {
   if (mainWindow) {
@@ -620,18 +955,14 @@ ipcMain.on('cancel-camera-preview', () => {
   if (cameraPreviewWindow) {
     cameraPreviewWindow.close()
   }
-  if (mainWindow) {
-    mainWindow.show()
-  }
+  showToolbar()
 })
 
 ipcMain.on('camera-settings-confirmed', (_, settings: { deviceId: string }) => {
   cameraPreviewConfirming = true
   currentCameraDeviceId = settings.deviceId
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.webContents.send('camera-settings-confirmed', settings)
-  }
+  showToolbar()
+  mainWindow?.webContents.send('camera-settings-confirmed', settings)
   if (cameraPreviewWindow) {
     cameraPreviewWindow.close()
     cameraPreviewWindow = null
@@ -657,6 +988,30 @@ ipcMain.on('hide-camera-window', () => {
     cameraRecordingWindow.hide()
   }
 })
+
+function showToolbar() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isVisible()) {
+      mainWindow.focus()
+    } else {
+      const win = mainWindow
+      win.setOpacity(0)
+      win.showInactive()
+      setTimeout(() => {
+        win.setOpacity(1)
+      }, 20)
+    }
+  }
+}
+
+function hideToolbar() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide()
+  }
+}
+
+ipcMain.on('show-toolbar', showToolbar)
+ipcMain.on('hide-toolbar', hideToolbar)
 
 ipcMain.on('show-camera-window', () => {
   if (cameraRecordingWindow) return
@@ -715,7 +1070,7 @@ ipcMain.on('close-camera-preview-window', () => {
 })
 
 // ============================================
-// 画中画 IPC
+// Picture-in-picture IPC
 // ============================================
 ipcMain.on('open-pip', () => {
   createPipWindow()
@@ -748,24 +1103,20 @@ ipcMain.on('start-area-selection', () => {
 })
 
 ipcMain.on('area-selected', (_, area: { x: number; y: number; width: number; height: number }) => {
-  // 保留阴影幕布，完全阻止其接收鼠标事件，避免事件转发导致鼠标状态闪烁
   if (selectionWindow) {
     selectionWindow.setIgnoreMouseEvents(true)
+    selectionWindow.setAlwaysOnTop(true, 'screen-saver')
     selectionWindow.webContents.send('switch-to-recording-visuals')
   }
 
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.webContents.send('area-selected', area)
-  }
+  showToolbar()
+  mainWindow?.webContents.send('area-selected', area)
 })
 
 ipcMain.on('cancel-area-selection', () => {
   destroySelectionWindow()
-  if (mainWindow) {
-    mainWindow.show()
-    mainWindow.webContents.send('area-selection-cancelled')
-  }
+  showToolbar()
+  mainWindow?.webContents.send('area-selection-cancelled')
 })
 
 ipcMain.on('recording-stopped', () => {
@@ -806,12 +1157,12 @@ ipcMain.on('process-area-crop', async (event, { filePath, cropParams }) => {
         event.reply('crop-failed', err.message)
       })
   } catch (err) {
-    console.error('[ZapRec] FFmpeg execution error:', err)
+    console.error('[Screen] FFmpeg execution error:', err)
   }
 })
 
 app.whenReady().then(() => {
-  // 自动授予摄像头和麦克风权限
+  // Auto-grant camera and microphone permissions
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     if (permission === 'media') {
       callback(true)
@@ -839,6 +1190,7 @@ app.whenReady().then(() => {
 
   createWindow()
   createTray()
+  loadSettings()
   registerShortcuts()
 
   app.on('activate', () => {
